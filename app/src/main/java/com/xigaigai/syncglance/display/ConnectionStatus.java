@@ -9,7 +9,7 @@ package com.xigaigai.syncglance.display;
  * 既费电又吵。所以这里只保留**状态枚举**：
  *
  * <pre>
- *   未连接（等待车机）            RouterService 也没在跑，车机连上来没人接
+ *   未连接（蓝牙未连接）          RouterService 没在跑 —— 根因就是车机蓝牙没连上
  *   未连接（Router 服务运行中）    Router 在监听 RFCOMM，等车机来连
  *   未连接（连接关闭）            这次连上过，现在断了
  *   已连接（未选中/后台/受限）    HMI 不是 FULL，车机上其实什么都没显示
@@ -28,7 +28,7 @@ public final class ConnectionStatus {
      * @param routerAlive RouterService 是否在跑（由 {@code SyncRouterService} 广播上报）
      * @param closedOnce  本次启动后是否"连上过又断开了"
      * @param content     FULL 时车机上显示的内容，可为 null
-     * @return 通知正文，例如「未连接（等待车机）」「已连接（歌曲）」
+     * @return 通知正文，例如「未连接（蓝牙未连接）」「已连接（歌曲）」
      */
     public static String text(SyncLifecycle.State hmi,
                               boolean routerAlive,
@@ -54,10 +54,11 @@ public final class ConnectionStatus {
                  * 三种"未连接"的区分：
                  *   连过又断   → 连接关闭（最可能是车机熄火 / 蓝牙断开）
                  *   Router 在跑 → 正在监听，等车机主动连
-                 *   Router 没跑 → 车机连上来也没人接，需要用户手动开一下 App
+                 *   Router 没跑 → 蓝牙压根没连上（Router 由 ACL_CONNECTED 触发，
+                 *                没有蓝牙链路就不会起来）。这是**常态**，不是故障。
                  */
                 if (closedOnce) return "未连接（连接关闭）";
-                return routerAlive ? "未连接（Router 服务运行中）" : "未连接（等待车机）";
+                return routerAlive ? "未连接（Router 服务运行中）" : "未连接（蓝牙未连接）";
         }
     }
 
