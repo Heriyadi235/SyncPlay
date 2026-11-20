@@ -645,6 +645,25 @@ Ford 自家 `Sync Destinations` 也是留空。
 > 因此本项目**不主动拉起 Router**，也不做应用层定时重试 —— Router 完全由
 > `ACL_CONNECTED` / SDL 库 / `queryForConnectedService` 控制。
 
+#### 5.8.1 补连接（官方推荐）
+
+应用启动时调一次 `SdlBroadcastReceiver.queryForConnectedService()`，
+主动问「现在有没有已连接的 RouterService」。用于「上车时 App 没起来 →
+车机连不上就放弃 → 用户后来才打开 App」的场景。
+
+- 位置：`SyncGlanceApp.onCreate()`（Application 级，任何进程启动都会跑）
+- **必须只在主进程执行**：`SyncRouterService` 跑在独立进程，那个进程里
+  「Router 问自己连上了吗」没有意义，还会干扰时序
+- **首次安装后的第一次启动会失败**（实测：第二次就成功）—— `Application.onCreate`
+  跑得极早，蓝牙权限/库内部初始化还没就绪，异常 message 往往为空。
+  所以失败时延迟 2 秒重试一次；仍失败也无妨，`ACL_CONNECTED` 主链路会兜住
+- 车机端还得重新做一次 SDP 查询才知道记录回来了，这一步不受应用控制
+
+> 历史：这段逻辑原先挂在 `SdlService.onStartCommand()` 里，用一个**实例字段**
+> 标记「只做一次」。但服务是「断开就 stopSelf、靠广播重新拉起」，每次重建都是
+> 新实例 → 标记重置，实际语义变成「每个实例一次」，和注释不符。现已挪到
+> Application 层。
+
 ---
 
 ## 六、权限

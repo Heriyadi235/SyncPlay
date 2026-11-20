@@ -86,14 +86,20 @@ public class SdlReceiver extends SdlBroadcastReceiver {
      * ★ 官方推荐写法，但要注意 debug 包下库会先跑 IntegrationValidator，
      *   配置不符会抛 RuntimeException，所以这里必须吞掉异常，
      *   否则用户一开应用就崩。
+     *
+     * @return true = 调用成功；false = 抛异常了（调用方可以稍后重试）
      */
-    public static void pokeIfBluetoothConnected(Context context) {
-        if (context == null) return;
+    public static boolean pokeIfBluetoothConnected(Context context) {
+        if (context == null) return false;
         try {
             queryForConnectedService(context);
             Log2.i(TAG, "已调用 queryForConnectedService（探测已连接的车机）");
+            return true;
         } catch (Exception e) {
-            Log2.w(TAG, "queryForConnectedService 失败: " + e.getMessage());
+            // 打上类型名：这条常常 message 为空，只打 getMessage() 查不出东西
+            Log2.w(TAG, "queryForConnectedService 失败: "
+                    + e.getClass().getSimpleName() + " " + e.getMessage());
+            return false;
         }
     }
 }

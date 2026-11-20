@@ -290,25 +290,8 @@ public class SdlService extends Service {
             Log2.i(TAG, "启动时连接仍有效（" + lifecycle.describe() + "），复用");
         }
 
-        // ★ 官方推荐的补连接动作（每个进程生命周期只做一次）。
-        //
-        //   场景：上车时应用进程不在 → 车机连不上就放弃 → 用户后来才打开应用。
-        //   这时 RouterService 可能已经从后台退出了，主动 queryForConnectedService
-        //   会让它重新挂起来监听 RFCOMM，把错过的连接补上。
-        //
-        //   官方文档强调：车机端还得重新做一次 SDP 查询才知道这条记录回来了，
-        //   那一步不受应用控制 —— 但这是应用侧唯一能做的。
-        if (!pokedConnectedService) {
-            pokedConnectedService = true;
-            com.xigaigai.syncglance.receiver.SdlReceiver
-                    .pokeIfBluetoothConnected(getApplicationContext());
-        }
-
         return START_STICKY;
     }
-
-    /** 每个进程生命周期只探测一次，避免每次 startService 都触发 ServiceFinder */
-    private boolean pokedConnectedService = false;
 
     /** 是否需要重建连接 */
     private boolean needRebuild() {
