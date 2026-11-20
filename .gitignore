@@ -1,0 +1,16 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+# Gradle 产物：必须匹配任意层级的 build/（app/build 里有 33MB 中间产物和 APK）
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties

@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SyncGlance —— SYNC 1.1 车载助手
+  歌曲信息 · 导航信息 · 计时器
+
+  关键约束（来自 AppLinkPro 实车测试）：
+  - targetSdk 必须是 32（见 app/build.gradle.kts）
+  - 主题必须是 Theme.AppCompat.*
+  - 传输层用 MultiplexTransportConfig（车机才能发现）
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 蓝牙（Android 12+ 权限拆分） -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+
+    <!-- 前台服务 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- 开机自启 / 蓝牙事件拉起 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 联网查歌词（lrclib.net） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- ★ 高德导航服务权限（dumpsys 显示 prot=normal，声明即可） -->
+    <uses-permission android:name="com.autonavi.minimap.permission.NAVIGATION_SERVICE" />
+
+    <!-- Android 11+ 需要声明才能 bind 或查询其他应用 -->
+    <queries>
+        <package android:name="com.autonavi.minimap" />
+        <intent>
+            <action android:name="com.autonavi.minimap.service.NAVIGATION_SERVICE" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+
+        <activity
+            android:name=".activity.MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".activity.LogActivity"
+            android:exported="true"
+            android:label="信息"
+            android:parentActivityName=".activity.MainActivity" />
+        <!-- SDL 通信服务（前台服务，常驻） -->
+        <service
+            android:name=".service.SdlService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- ===== SDL 传输层 =====
+             这两个是 SDL 官方标准集成，缺一不可：
+
+             1. SyncRouterService —— 常驻的蓝牙路由器。负责监听 RFCOMM、
+                注册 SDP 记录（车机靠它发现本应用），并把一条物理连接
+                多路复用给多个 SDL 应用。action 必须是库定义的那个字符串。
+             2. SdlReceiver —— 官方生命周期入口。监听 ACL_CONNECTED 与
+                sdl.router.startservice，负责把整个链路串起来。
+
+             之前只用了自写的 BootReceiver，没有声明 router service，
+             于是「应用没启动时车机连不上、之后也再连不上」——
+             因为没有任何东西在车机连接窗口期里监听 RFCOMM。 -->
+        <service
+            android:name=".receiver.SyncRouterService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.smartdevicelink.router.service" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".receiver.SdlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.PACKAGE_REMOVED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 蓝牙/开机事件拉起服务 -->
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+                <action android:name="android.bluetooth.adapter.action.STATE_CHANGED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- 装包/升级后立即重连（对应 BootReceiver 里的分支） -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ★ 通知监听：读音乐/导航 app 的通知 -->
+        <service
+            android:name=".service.NotificationCatcher"
+            android:exported="false"
+            android:label="@string/notif_service_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>

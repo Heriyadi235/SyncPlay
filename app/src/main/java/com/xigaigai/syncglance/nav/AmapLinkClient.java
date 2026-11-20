@@ -1,0 +1,888 @@
+package com.xigaigai.syncglance.nav;
+
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.ServiceConnection;
+import android.os.Binder;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.Parcel;
+import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
+
+import com.xigaigai.syncglance.util.Log2;
+
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * 高德导航数据探测（AmapLink）。
+ *
+ * === 原理 ===
+ * 高德手机版内部给智能眼镜/穿戴设备留了一条导航通道：
+ *
+ *   Intent("com.autonavi.minimap.service.NAVIGATION_SERVICE")
+ *     → ComponentName("com.autonavi.minimap",
+ *                     "com.amap.bundle.wearable.connect.glass.AmapLinkService")
+ *
+ * 绑上之后通过 AIDL 通信：
+ *   ILinkSdkControl:
+ *     transact 1 = 授权，返回 JSON（status / data.token）
+ *     transact 2 = 执行命令（cmd / requestId / token / sessionId）
+ *     transact 3 = 注册回调（writeStrongBinder）
+ *     transact 4 = 注销回调
+ *   ILinkSdkCallback:
+ *     transact 1 = String（小包）
+ *     transact 2 = (String metadata, ParcelFileDescriptor fd)（大包走共享 FD）
+ *
+ * === 回调是加密的 ===
+ * Base64 解码后：[idLen][id][keyLen][key][nonce 12][ciphertext]
+ * AES-GCM 解密，AAD 用 id，密钥就是信封里带的那个（不是授权 token）。
+ *
+ * === 参考 ===
+ * https://github.com/fw867/hypercar
+ *
+ * 本阶段目标：**只要能拿到回调就算成功**，解析先放一边。
+ */
+public class AmapLinkClient {
+
+    private static final String TAG = "AmapLink";
+
+    private static final String PKG = "com.autonavi.minimap";
+    private static final String SERVICE_ACTION = "com.autonavi.minimap.service.NAVIGATION_SERVICE";
+    private static final String SERVICE_CLASS =
+            "com.amap.bundle.wearable.connect.glass.AmapLinkService";
+    private static final String CONTROL = "com.amap.linksdk.aidldefine.ILinkSdkControl";
+    private static final String CALLBACK = "com.amap.linksdk.aidldefine.ILinkSdkCallback";
+
+    /** 单包上限 */
+    private static final int MAX_BYTES = 4 * 1024 * 1024;
+    /**
+     * 最多重连次数。
+     * 官方 iOS SDK 推荐 maxReconnectAttempts = 50 / reconnectDelay = 2，
+     * 即总共试约 100 秒。
+     */
+    private static final int MAX_ATTEMPTS = 50;
+    /** 重连间隔（官方推荐 2 秒） */
+    private static final long RETRY_DELAY_MS = 2_000;
+    /** 绑定/注册超时 */
+    private static final long WATCHDOG_MS = 10_000;
+
+    private static AmapLinkClient instance;
+
+    /** 导航数据回调 */
+    public interface NavListener {
+        void onNavigation(com.xigaigai.syncglance.model.Navigation nav);
+    }
+
+    private static volatile NavListener navListener;
+
+    public static void setNavListener(NavListener l) { navListener = l; }
+
+    /**
+     * 车机是否已连接（FULL）。
+     *
+     * 没连车机时导航数据没人看，跳过解密和解析能省不少 CPU
+     * （AES-GCM 每秒跑 1~2 次）。
+     * 但**仍然读取 fd 并记录心跳**，方便在手机上确认链路是通的。
+     */
+    private static volatile boolean headUnitConnected = false;
+
+    /**
+     * 强制解析开关。
+     *
+     * 默认关：没连车机时跳过解码省 CPU。
+     * 打开后：不管车机连不连都解码，方便在手机上测试导航功能。
+     */
+    private static volatile boolean forceParse = false;
+
+    public static void setForceParse(boolean on) {
+        forceParse = on;
+        Log2.i(TAG, "强制解析导航包：" + (on ? "开" : "关"));
+    }
+
+    public static boolean isForceParse() { return forceParse; }
+
+    /** 是否应该解码（车机连着，或者开了强制解析） */
+    private static boolean shouldDecode() {
+        return headUnitConnected || forceParse;
+    }
+
+    public static void setHeadUnitConnected(boolean connected) {
+        headUnitConnected = connected;
+    }
+
+    public static boolean isHeadUnitConnected() { return headUnitConnected; }
+
+    public static synchronized AmapLinkClient get(Context ctx) {
+        if (instance == null) instance = new AmapLinkClient(ctx.getApplicationContext());
+        return instance;
+    }
+
+    private final Context ctx;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+
+    // 绑定代际，防止旧回调污染
+    private long generation = 0;
+    private boolean closed = false;
+    private int attempts = 0;
+    private Attempt current;
+    private int remoteUid = -1;
+
+    // 统计
+    private volatile int callbackCount = 0;
+    private volatile boolean authenticated = false;
+    private volatile boolean registered = false;
+    private final Map<Integer, String> lastByType = new ConcurrentHashMap<>();
+
+    private AmapLinkClient(Context ctx) {
+        this.ctx = ctx;
+        try {
+            remoteUid = ctx.getPackageManager()
+                    .getApplicationInfo(PKG, 0).uid;
+        } catch (Exception e) {
+            Log2.w(TAG, "找不到高德包");
+        }
+    }
+
+    /** 当前状态摘要，给 UI 显示 */
+    public String status() {
+        if (closed) return "已停止";
+        if (registered) return "已注册回调（收到 " + callbackCount + " 条）";
+        if (authenticated) return "已授权，等待注册";
+        if (current != null) return "已绑定，认证中";
+        return "未连接（尝试 " + attempts + "/" + MAX_ATTEMPTS + "）";
+    }
+
+    /**
+     * 主界面「导航」那一行显示的状态。
+     *
+     *   已连接（导航中）—— 连上了且有导航数据
+     *   已连接           —— 连上了但还没开始导航
+     *   尝试重连中 (n/50) —— 正在重试
+     *   高德地图未启动   —— 试完 50 次都没连上
+     */
+    public String displayStatus() {
+        if (registered) {
+            return nav.hasData() ? "已连接（导航中）" : "已连接";
+        }
+        if (current != null) {
+            return "尝试重连中 (" + attempts + "/" + MAX_ATTEMPTS + ")";
+        }
+        if (attempts >= MAX_ATTEMPTS) {
+            return "高德地图未启动";
+        }
+        if (attempts > 0) {
+            return "尝试重连中 (" + attempts + "/" + MAX_ATTEMPTS + ")";
+        }
+        return "未连接";
+    }
+
+    public boolean isRegistered() { return registered; }
+    public int getCallbackCount() { return callbackCount; }
+
+    // ---------------- 启动 / 停止 ----------------
+
+    public void start() {
+        synchronized (this) {
+            if (!closed && current != null) {
+                Log2.i(TAG, "已在运行");
+                return;
+            }
+            closed = false;
+            attempts = 0;
+        }
+        Log2.i(TAG, "开始绑定高德导航服务…");
+        bind();
+    }
+
+    public void stop() {
+        synchronized (this) {
+            closed = true;
+            generation++;
+        }
+        Attempt a = current;
+        current = null;
+        if (a != null) a.retire();
+        authenticated = false;
+        registered = false;
+        nav.clear();
+        clearListener();
+        Log2.i(TAG, "已停止");
+    }
+
+    /** 通知监听方：导航数据没了 */
+    private void clearListener() {
+        NavListener l = navListener;
+        if (l != null) {
+            try {
+                com.xigaigai.syncglance.model.Navigation empty =
+                        new com.xigaigai.syncglance.model.Navigation();
+                empty.clear();
+                l.onNavigation(empty);
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private synchronized boolean beginAttempt() {
+        if (closed || attempts >= MAX_ATTEMPTS) return false;
+        attempts++;
+        generation++;
+        return true;
+    }
+
+    private synchronized boolean accepts(long token) {
+        return !closed && generation == token;
+    }
+
+    private long retryDelay() {
+        return RETRY_DELAY_MS;
+    }
+
+    /**
+     * 外部唤醒：重新开始一轮重试。
+     *
+     * 触发时机：
+     *   - 用户点了「高德地图」按钮
+     *   - 用户点了「回家 / 去公司」
+     *   - 收到高德的通知（说明它启动了）
+     */
+    public void wakeUp() {
+        synchronized (this) {
+            if (registered) {
+                Log2.i(TAG, "已连接，无需重连");
+                return;
+            }
+            if (closed) {
+                Log2.i(TAG, "服务已关闭，重新启动");
+                closed = false;
+            }
+            if (current != null) {
+                Log2.i(TAG, "正在连接中，忽略唤醒");
+                return;
+            }
+            attempts = 0;      // 重置重试计数
+        }
+        Log2.i(TAG, "收到唤醒，重新尝试连接高德");
+        bind();
+    }
+
+    private void bind() {
+        main.post(() -> {
+            if (closed) return;
+            if (current != null) return;
+
+            if (remoteUid < 0) {
+                Log2.w(TAG, "高德未安装，退出");
+                return;
+            }
+            if (!beginAttempt()) {
+                Log2.w(TAG, "已重试 " + MAX_ATTEMPTS + " 次，停止。"
+                        + "检查高德是否在跑、有没有给本应用「关联启动」权限");
+                return;
+            }
+
+            Attempt a = new Attempt(generation);
+            current = a;
+
+            Intent intent = new Intent(SERVICE_ACTION)
+                    .setComponent(new ComponentName(PKG, SERVICE_CLASS));
+
+            try {
+                a.bound = ctx.bindService(intent, a.connection, Context.BIND_AUTO_CREATE);
+            } catch (Exception e) {
+                Log2.e(TAG, "bindService 异常", e);
+                a.bound = false;
+            }
+
+            Log2.i(TAG, "bind=" + a.bound + " 第 " + attempts + " 次尝试");
+
+            if (a.bound) {
+                main.postDelayed(a.watchdog, WATCHDOG_MS);
+            } else {
+                retry(a, "未接受绑定（需要「关联启动」权限？）");
+            }
+        });
+    }
+
+    private void retry(Attempt a, String reason) {
+        if (closed || current != a) return;
+        Log2.w(TAG, reason + "；" + retryDelay() + "ms 后重试");
+        a.retire();
+        current = null;
+        main.postDelayed(this::bind, retryDelay());
+    }
+
+    // ---------------- 单次绑定 ----------------
+
+    private class Attempt {
+        final long token;
+        volatile boolean bound = false;
+        volatile boolean retired = false;
+        volatile boolean authed = false;
+        volatile boolean regged = false;
+        volatile IBinder remote;
+        final long sessionId = SystemClock.elapsedRealtime() % 900000 + 100000;
+
+        Attempt(long token) {
+            this.token = token;
+        }
+
+        final Runnable watchdog = () -> {
+            if (!retired && !regged) retry(this, "绑定/认证超时");
+        };
+
+        final ServiceConnection connection = new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                if (retired) return;
+                remote = service;
+                Log2.i(TAG, "✓ 服务已连接，descriptor=" + safeDescriptor(service));
+                worker.execute(() -> register(service));
+            }
+
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+                remote = null;
+                retry(Attempt.this, "服务断开");
+            }
+
+            @Override
+            public void onBindingDied(ComponentName name) {
+                remote = null;
+                retry(Attempt.this, "绑定失效");
+            }
+
+            @Override
+            public void onNullBinding(ComponentName name) {
+                retry(Attempt.this, "空绑定");
+            }
+        };
+
+        /** 回调 Binder —— 高德反向调我们 */
+        final Binder callback = new Binder() {
+            @Override
+            public boolean onTransact(int code, Parcel data, Parcel reply, int flags) {
+                if (code == INTERFACE_TRANSACTION) {
+                    if (reply != null) reply.writeString(CALLBACK);
+                    return true;
+                }
+                if (code < 1 || code > 2) return false;
+
+                // ★ 防伪造：只认高德的 UID
+                if (Binder.getCallingUid() != remoteUid) {
+                    Log2.w(TAG, "拒绝伪造回调，uid=" + Binder.getCallingUid());
+                    return false;
+                }
+
+                data.enforceInterface(CALLBACK);
+
+                if (code == 1) {
+                    String text = data.readString();
+                    if (text != null) handleSmallPayload(text);
+                } else {
+                    String metadata = data.readString();
+                    ParcelFileDescriptor fd = data.readInt() != 0
+                            ? ParcelFileDescriptor.CREATOR.createFromParcel(data) : null;
+                    if (fd != null) handleFdPayload(metadata, fd);
+                }
+
+                if (reply != null) reply.writeNoException();
+                return true;
+            }
+        };
+
+        void retire() {
+            retired = true;
+            authed = false;
+            regged = false;
+            main.removeCallbacks(watchdog);
+
+            IBinder svc = remote;
+            boolean wasRegged = regged;
+            remote = null;
+            regged = false;
+
+            if (svc != null && wasRegged) {
+                try {
+                    worker.execute(() -> {
+                        try { call(svc, 4, p -> p.writeStrongBinder(callback)).recycle(); }
+                        catch (Exception ignored) { }
+                    });
+                } catch (Exception ignored) { }
+            }
+            if (bound) {
+                bound = false;
+                try { ctx.unbindService(connection); } catch (Exception ignored) { }
+            }
+        }
+    }
+
+    private static String safeDescriptor(IBinder b) {
+        try { return b == null ? "null" : b.getInterfaceDescriptor(); }
+        catch (Exception e) { return "?"; }
+    }
+
+    // ---------------- 注册流程 ----------------
+
+    private void register(IBinder service) {
+        Attempt a = current;
+        if (a == null || a.retired) return;
+
+        try {
+            String desc = service.getInterfaceDescriptor();
+            if (!CONTROL.equals(desc)) {
+                Log2.w(TAG, "接口描述符不匹配: " + desc + "（期望 " + CONTROL + "）");
+            }
+
+            // --- transact 1：授权 ---
+            Parcel authReply = call(service, 1, p -> { });
+            String authJson;
+            try {
+                authJson = authReply.readString();
+            } finally {
+                authReply.recycle();
+            }
+
+            Log2.i(TAG, "授权返回: " + abbreviate(authJson, 500));
+            Log2.raw("←auth", authJson);
+
+            JSONObject authObj = null;
+            try { authObj = new JSONObject(authJson == null ? "{}" : authJson); }
+            catch (Exception ignored) { }
+
+            boolean ok = authObj != null && "success".equals(authObj.optString("status"));
+            a.authed = ok;
+            authenticated = ok;
+
+            if (!ok) {
+                Log2.w(TAG, "授权未通过，全部字段：" + (authObj == null ? "解析失败" : authObj.toString()));
+                main.post(() -> retry(a, "授权被拒"));
+                return;
+            }
+            Log2.i(TAG, "✓ 授权成功");
+
+            // --- transact 3：注册回调 ---
+            Parcel regReply = call(service, 3, p -> p.writeStrongBinder(a.callback));
+            boolean accepted;
+            try {
+                accepted = regReply.readInt() != 0;
+            } finally {
+                regReply.recycle();
+            }
+
+            a.regged = accepted;
+            registered = accepted;
+            Log2.i(TAG, (accepted ? "✓ 回调注册成功" : "✗ 回调注册被拒"));
+
+            if (accepted) {
+                main.post(() -> {
+                    if (!a.retired) {
+                        main.removeCallbacks(a.watchdog);
+                        attempts = 0;
+                    }
+                });
+                // 主动查一次导航数据：cmd 5 = 获取导航结构化数据
+                String token = authObj.optJSONObject("data") == null ? ""
+                        : authObj.optJSONObject("data").optString("token");
+                if (!token.isEmpty()) {
+                    for (int cmd : new int[]{7, 5}) {
+                        try {
+                            JSONObject req = new JSONObject()
+                                    .put("cmd", cmd)
+                                    .put("requestId", (int) (System.nanoTime() % 900000 + 100000))
+                                    .put("token", token)
+                                    .put("sessionId", "syncglance-" + a.sessionId);
+                            Parcel r = call(service, 2, p -> p.writeString(req.toString()));
+                            String resp;
+                            try { resp = r.readString(); } finally { r.recycle(); }
+                            Log2.i(TAG, "查询 cmd=" + cmd + " 返回: " + abbreviate(resp, 300));
+                            Log2.raw("←cmd" + cmd, resp);
+                        } catch (Exception e) {
+                            Log2.w(TAG, "查询 cmd=" + cmd + " 失败: " + e.getMessage());
+                        }
+                    }
+                } else {
+                    Log2.w(TAG, "授权返回里没有 token，跳过主动查询");
+                }
+            } else {
+                main.post(() -> retry(a, "注册不被接受"));
+            }
+
+        } catch (Exception e) {
+            Log2.e(TAG, "注册流程异常", e);
+            main.post(() -> retry(a, "注册失败"));
+        }
+    }
+
+    /** 发一次 transact 调用 */
+    private Parcel call(IBinder target, int code, WriteAction write) {
+        Parcel req = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            req.writeInterfaceToken(CONTROL);
+            write.write(req);
+            if (!target.transact(code, req, reply, 0)) {
+                throw new IllegalStateException("transact " + code + " 返回 false");
+            }
+            reply.readException();
+            return reply;
+        } catch (Exception e) {
+            reply.recycle();
+            throw new RuntimeException(e);
+        } finally {
+            req.recycle();
+        }
+    }
+
+    private interface WriteAction {
+        void write(Parcel p);
+    }
+
+    // ---------------- 回调处理 ----------------
+
+    /** 小包回调 */
+    private void handleSmallPayload(String raw) {
+        callbackCount++;
+
+        // 车机没连：不解密，只记心跳
+        if (!shouldDecode()) {
+            if (shouldLogHeartbeat()) {
+                Log2.i(TAG, "收到回调 #" + callbackCount
+                        + "（小包 " + raw.length() + " 字符，未连车机跳过解码）");
+            }
+            return;
+        }
+
+        if (shouldLogHeartbeat()) {
+            Log2.i(TAG, "收到回调 #" + callbackCount + "（小包 " + raw.length() + " 字符）");
+        }
+
+        String plain = LinkEnvelope.decode(raw);
+        if (plain == null) {
+            Log2.w(TAG, "信封解密失败（" + raw.length() + " 字符）");
+            return;
+        }
+        onDecrypted(plain);
+    }
+
+    /** 心跳日志：前几次 + 2 的幂次，避免刷屏 */
+    private boolean shouldLogHeartbeat() {
+        return callbackCount <= 3 || (callbackCount & (callbackCount - 1)) == 0;
+    }
+
+    /**
+     * 大包回调（走共享 FD）。
+     *
+     * 车机没连时：**仍然读完 fd 并关闭**（否则会泄漏），但跳过解密和解析。
+     */
+    private void handleFdPayload(String metadata, ParcelFileDescriptor fd) {
+        worker.execute(() -> {
+            try (ParcelFileDescriptor.AutoCloseInputStream in =
+                         new ParcelFileDescriptor.AutoCloseInputStream(fd)) {
+                String raw = readAll(in);
+                callbackCount++;
+
+                if (!shouldDecode()) {
+                    if (shouldLogHeartbeat()) {
+                        Log2.i(TAG, "收到回调 #" + callbackCount
+                                + "（大包 " + raw.length() + " 字符，未连车机跳过解码）");
+                    }
+                    return;
+                }
+
+                String plain = LinkEnvelope.decode(raw);
+                if (plain == null) {
+                    Log2.w(TAG, "FD 信封解密失败（" + raw.length() + " 字符）");
+                    return;
+                }
+                onDecrypted(plain);
+            } catch (Exception e) {
+                Log2.w(TAG, "FD 处理失败: " + e.getMessage());
+            }
+        });
+    }
+
+    /** 正在累积的导航状态 */
+    private final com.xigaigai.syncglance.model.Navigation nav =
+            new com.xigaigai.syncglance.model.Navigation();
+
+    /** 解密后的业务数据 */
+    private void onDecrypted(String plain) {
+        try {
+            JSONObject json = new JSONObject(plain);
+            int bizType = json.optInt("bizType", -1);
+
+            if (bizType != 113) {
+                Log2.i(TAG, "解密后 bizType=" + bizType + " 内容: " + abbreviate(plain, 300));
+                Log2.raw("←plain", plain);
+                return;
+            }
+
+            // bizType 113 = 导航业务数据
+            Object datasRaw = json.opt("datas");
+            String datas = datasRaw instanceof String ? (String) datasRaw : String.valueOf(datasRaw);
+            org.json.JSONArray arr = new org.json.JSONArray(datas);
+
+            boolean changed = false;
+
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject item = arr.optJSONObject(i);
+                if (item == null) continue;
+                int type = item.optInt("type", -1);
+                Object val = item.opt("data");
+                JSONObject data = val instanceof JSONObject ? (JSONObject) val
+                        : (val instanceof String ? tryParse((String) val) : null);
+
+                if (applyToNav(type, data)) changed = true;
+
+                String summary = summarize(type, data);
+                if (summary == null) continue;
+
+                String prev = lastByType.get(type);
+                if (!summary.equals(prev)) {
+                    lastByType.put(type, summary);
+                    Log2.i(TAG, "导航事件 type=" + type + "  " + summary);
+                }
+            }
+
+            if (changed) {
+                dispatch(criticalEvent);
+                criticalEvent = false;
+            }
+
+        } catch (Exception e) {
+            Log2.w(TAG, "解析失败: " + e.getMessage() + "  原文: " + abbreviate(plain, 300));
+            Log2.raw("←plain", plain);
+        }
+    }
+
+    /** 把事件写入 Navigation 对象 */
+    private boolean applyToNav(int type, JSONObject d) {
+        switch (type) {
+            case 4: {
+                if (d == null) return false;
+                int maneuver = d.optInt("curManeuverID", -1);
+                long segRemain = d.optLong("segmentRemainDist", -1);
+                // 距离缺失时 formatDistance 返回空串，trim 掉多余尾空格
+                nav.instruction = (maneuverName(maneuver) + " " + formatDistance(segRemain)).trim();
+                nav.road = d.optString("nextRouteName", "");
+                long remain = d.optLong("routeRemainDist", -1);
+                long remainSec = d.optLong("routeRemainTime", -1);
+                nav.remainDistanceMeters = remain;
+                nav.remainSeconds = remainSec;
+                nav.remainDistance = formatDistance(remain);
+                nav.etaMillis = remainSec > 0
+                        ? System.currentTimeMillis() + remainSec * 1000 : -1;
+                nav.lastUpdateMillis = System.currentTimeMillis();
+                return true;
+            }
+            case 5: {
+                if (d == null) return false;
+                int maneuver = d.optInt("maneuverID", -1);
+                // ★ type 5 比 type 4 早到约 200ms，而且两者的编号经常不同：
+                //   5 的 maneuverID 是"下一条路的入口图标"，
+                //   4 的 curManeuverID 才是"当前这一段该做的动作"。
+                //   以前拿 5 直接改写指令文字，会让箭头先跳到新图标、
+                //   200ms 后又被 4 改回来，肉眼就是闪一下。
+                //   所以 5 只在一句话都还没有的时候兜底。
+                if (nav.instruction == null || nav.instruction.trim().isEmpty()) {
+                    nav.instruction = maneuverName(maneuver);
+                    nav.lastUpdateMillis = System.currentTimeMillis();
+                    return true;
+                }
+                return false;
+            }
+            case 7:
+                Log2.i(TAG, "★ 导航开始，清空旧状态");
+                nav.clear();
+                nav.lastUpdateMillis = System.currentTimeMillis();
+                criticalEvent = true;
+                return true;
+            case 100:
+            case 200:
+                Log2.i(TAG, "★ 导航结束/到达，清空导航状态");
+                nav.clear();
+                nav.lastUpdateMillis = 0;
+                criticalEvent = true;      // 必须立刻通知显示层降级
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 本次解析里是否包含需要立即推送的关键事件 */
+    private boolean criticalEvent = false;
+
+    private static long lastDispatchAt = 0;
+
+    private void dispatch() {
+        dispatch(false);
+    }
+
+    /**
+     * 推送导航状态给显示层。
+     *
+     * @param force true 表示立即推送、不受 2 秒节流限制。
+     *              导航开始/结束这类关键事件必须立刻送达，
+     *              否则界面会卡在旧状态等下一次音乐通知。
+     */
+    private void dispatch(boolean force) {
+        NavListener l = navListener;
+        if (l == null) return;
+
+        long now = System.currentTimeMillis();
+        if (!force && now - lastDispatchAt < 2000) return;
+        lastDispatchAt = now;
+        try {
+            com.xigaigai.syncglance.model.Navigation copy =
+                    new com.xigaigai.syncglance.model.Navigation();
+            copy.instruction = nav.instruction;
+            copy.road = nav.road;
+            copy.remainDistance = nav.remainDistance;
+            copy.remainDistanceMeters = nav.remainDistanceMeters;
+            copy.remainSeconds = nav.remainSeconds;
+            copy.etaMillis = nav.etaMillis;
+            copy.lastUpdateMillis = nav.lastUpdateMillis;
+            l.onNavigation(copy);
+        } catch (Exception e) {
+            Log2.w(TAG, "推送失败: " + e.getMessage());
+        }
+    }
+
+    /** 距离格式化：1500 → 1.5 km，850 → 850 m */
+    private static String formatDistance(long meters) {
+        if (meters < 0) return "";
+        if (meters < 1000) return meters + " m";
+        return String.format(java.util.Locale.US, "%.1f km", meters / 1000.0);
+    }
+
+    /** 按 type 生成一行摘要 */
+    private static String summarize(int type, JSONObject d) {
+        if (d == null) return null;
+        switch (type) {
+            case 4: {
+                // 行中导航信息
+                return "转向=" + maneuverName(d.optInt("curManeuverID", -1))
+                        + " 段剩余=" + d.opt("segmentRemainDist") + "m"
+                        + " 全程剩余=" + d.opt("routeRemainDist") + "m"
+                        + " 剩余时间=" + d.opt("routeRemainTime") + "s"
+                        + " 下一条路=" + d.optString("nextRouteName")
+                        + " 当前路=" + d.optString("curRouteName");
+            }
+            case 5: {
+                return "转向图标=" + maneuverName(d.optInt("maneuverID", -1));
+            }
+            case 7:  return "开始导航";
+            case 100: return "导航结束";
+            case 200: return "已到达";
+            case 14: {
+                return "车道数=" + d.opt("laneCount")
+                        + " back=[" + d.opt("backLane") + "]"
+                        + " front=[" + d.opt("frontLane") + "]";
+            }
+            default:
+                return null;   // 其他类型不打，避免刷屏
+        }
+    }
+
+    /**
+     * 高德转向图标 ID → 中文。
+     *
+     * 编号依据高德导航 SDK v11.1.0 的 AmapIconType（与车机 ManeuverIconID 同源）：
+     * 0/1 是占位（无定义、自车），2 起才是真正的转向图标。
+     * 29~54 是骑行/步行专有图标，本 App 只在驾车场景用到，做了兜底但不细究。
+     * 65/66 是 v11 新增的"靠左/靠右"，2012 Focus 实测 66 出现在辅路分岔处。
+     *
+     * 未收录的编号一律显示"行驶"，避免把"未知(66)"这种内部编号暴露给驾驶者。
+     */
+    public static String maneuverName(int id) {
+        switch (id) {
+            case 2:  return "左转";
+            case 3:  return "右转";
+            case 4:  return "左前方";
+            case 5:  return "右前方";
+            case 6:  return "左后方";
+            case 7:  return "右后方";
+            case 8:  return "掉头";
+            case 9:  return "直行";
+            case 10: return "途经点";
+            case 11: return "进环岛";
+            case 12: return "出环岛";
+            case 13: return "服务区";
+            case 14: return "收费站";
+            case 15: return "到达终点";
+            case 16: return "隧道出口";
+            case 17: return "进环岛";
+            case 18: return "出环岛";
+            case 19: return "掉头";
+            case 20: return "顺行";
+            case 21: return "环岛左转";
+            case 22: return "环岛右转";
+            case 23: return "环岛直行";
+            case 24: return "环岛掉头";
+            case 25: return "环岛左转";
+            case 26: return "环岛右转";
+            case 27: return "环岛直行";
+            case 28: return "环岛掉头";
+            case 29: return "人行横道";
+            case 30: return "过街天桥";
+            case 31: return "地下通道";
+            case 32: return "广场";
+            case 33: return "公园";
+            case 34: return "扶梯";
+            case 35: return "直梯";
+            case 36: return "索道";
+            case 37: return "空中通道";
+            case 38: return "通道";
+            case 39: return "行人道路";
+            case 40: return "游船路线";
+            case 41: return "观光路线";
+            case 42: return "滑道";
+            case 43: return "阶梯";
+            case 44: return "斜坡";
+            case 45: return "过桥";
+            case 46: return "轮渡";
+            case 47: return "地铁通道";
+            case 48: return "进入建筑";
+            case 49: return "离开建筑";
+            case 50: return "电梯换层";
+            case 51: return "楼梯换层";
+            case 52: return "扶梯换层";
+            case 53: return "红绿灯路口";
+            case 54: return "路口";
+            case 65: return "靠左";
+            case 66: return "靠右";
+            default: return "行驶";
+        }
+    }
+
+    private static JSONObject tryParse(String s) {
+        try { return new JSONObject(s); } catch (Exception e) { return null; }
+    }
+
+    private static String readAll(InputStream in) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) >= 0) {
+            if (out.size() + n > MAX_BYTES) throw new IllegalStateException("超过 4MiB");
+            out.write(buf, 0, n);
+        }
+        return out.toString("UTF-8");
+    }
+
+    private static String abbreviate(String s, int max) {
+        if (s == null) return "null";
+        return s.length() <= max ? s : s.substring(0, max) + "…";
+    }
+}
