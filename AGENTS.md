@@ -218,4 +218,104 @@ OnKeyboardInput  OnTouchEvent  OnWayPointChange
 理由：这个项目的所有文档、日志、踩坑记录都是中文的，
 用英文思考会在术语（"恢复连接""软键""车机"）上产生偏差。
 
+---
+
+## 七、调试与装机（adb）—— 每次改代码都要用
+
+> 本节从本机那份 `DEVICE-CONNECTION.md` 提炼（那份文档含序列号/用户名，**不进仓库**）。
+> ⚠️ 那份文档里「`sdl_android:4.12.2` / `targetSdk 32`」的段落**已过时**，
+> 本项目现在是 `5.8.0` / `targetSdk 35`，别照抄。
+
+### 7.1 环境
+
+```powershell
+# adb：用环境变量拼，避免把用户名写进仓库
+$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
+
+# 构建用 JDK（Gradle 必须要，否则报 JAVA_HOME is not set）
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+
+# 只有一台设备时不要加 -s <序列号>，adb 会自动选中；
+# 多设备时先 `& $adb devices` 看第一列。
+```
+
+### 7.2 装机顺序（★ 顺序不能反）
+
+```powershell
+$pkg = "com.xigaigai.syncglance"
+$apk = "app\build\outputs\apk\debug\app-debug.apk"
+
+& $adb install -r $apk
+& $adb shell pm uninstall --user 900 $pkg        # ★ 必须在 install 之后
+& $adb shell pm grant $pkg android.permission.BLUETOOTH_CONNECT
+& $adb shell pm grant $pkg android.permission.BLUETOOTH_SCAN
+& $adb shell am start -n $pkg/.activity.MainActivity
+```
+
+**为什么必须清 user 900**：这台机器会自动把通过 adb 安装的应用复制到
+「应用分身」用户（user 900），桌面出现两个同名图标，启动时弹「选择要使用的应用程序」，
+`am start` 落到 `ResolverActivity`，表现完全像"闪退 / 点了没反应"。
+
+- **反着做（先清后装）无效** —— install 时系统会立刻再复制一份。
+- 每次重新安装后都要再清一次，直到查不到：
+  ```powershell
+  & $adb shell pm list packages --user 900 | Select-String 'syncglance'   # 应为空
+  ```
+- 主用户安装记录损坏（`dumpsys package` 里 `User 0: installed=false`）时：
+  `& $adb shell pm install-existing --user 0 $pkg`
+
+### 7.3 截图（★ 不要用 `exec-out` 重定向）
+
+```powershell
+& $adb shell screencap -p /sdcard/s.png
+& $adb pull /sdcard/s.png build\shot.png
+& $adb shell rm /sdcard/s.png
+```
+
+**踩过的坑**：`& $adb exec-out screencap -p > shot.png` 在 PowerShell 里会把二进制当文本重定向，
+写出来的 PNG 是坏的，`read_image` 直接报 `Unsupported or malformed image data`。
+**一律走「设备上存文件 → pull」。**
+
+### 7.4 点按钮不要猜坐标
+
+```powershell
+& $adb shell uiautomator dump /sdcard/ui.xml
+& $adb pull /sdcard/ui.xml build\ui.xml
+# 从 xml 里取 text / content-desc 对应的 bounds="[x1,y1][x2,y2]"，算中点再
+& $adb shell input tap <x> <y>
+```
+
+### 7.5 常用排查
+
+```powershell
+& $adb logcat -c
+& $adb shell am force-stop $pkg
+& $adb shell am start -n $pkg/.activity.LogActivity
+& $adb logcat -d -v brief | Select-String 'SyncGlance|Lyric|AmapLink'
+& $adb logcat -d -v brief | Select-String 'FATAL EXCEPTION' -Context 0,12
+& $adb shell pidof $pkg                        # 进程活着吗
+& $adb shell dumpsys window | Select-String 'mCurrentFocus'
+```
+
+连上网易云这类接口时，也可以在电脑上直接复现 App 的请求（排查歌词匹配很有效）：
+`Invoke-WebRequest -UseBasicParsing -Headers @{'User-Agent'=...;'Referer'='https://music.163.com/'} -Uri <url>`。
+
+### 7.6 这台机器的 PowerShell 是 5.1，有几个坑
+
+| 坑 | 表现 | 做法 |
+|---|---|---|
+| 沙箱后端 | 默认 `workspace-write` 报 `--temp is not an existing directory` | 所有 pwsh 调用带 `sandbox_permissions: danger-full-access` |
+| `2>&1 \|` | Gradle 的 stderr 被当成 `NativeCommandError`，**exit code 1**，但构建其实成功 | 认 `BUILD SUCCESSFUL`，别认 exit code |
+| `Invoke-WebRequest` | 非交互模式报「朗读和提示功能不可用」 | 必须加 `-UseBasicParsing` |
+| `[System.Web.HttpUtility]` | `TypeNotFoundException` | 用 `[uri]::EscapeDataString(...)` |
+| 中文编码 | 中文变乱码 | 写文件用 UTF-8；`Select-String`/`Get-Content` 带 `-Encoding UTF8` |
+
+### 7.7 构建
+
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+.\gradlew.bat :app:assembleDebug --console=plain
+# 产物：app\build\outputs\apk\debug\app-debug.apk
+```
+
 
