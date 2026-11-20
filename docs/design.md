@@ -664,6 +664,44 @@ Ford 自家 `Sync Destinations` 也是留空。
 > 新实例 → 标记重置，实际语义变成「每个实例一次」，和注释不符。现已挪到
 > Application 层。
 
+#### 5.8.2 关于 `IntegrationValidator` 那个 ✕（不要被它误导）
+
+debug 包首次调用 `queryForConnectedService` 时，日志会出现：
+
+```
+W/SyncGlance: [SdlReceiver] queryForConnectedService 失败: RuntimeException
+  Integration Validator Results:
+  ✓ Permission check passed
+  ✓ SdlRouterService checks were not performed yet due to supplied flags
+  ✕ This application has not specified its SDL Receiver properly.
+```
+
+`IntegrationValidator.checkBroadcastReceiver()` 的判据是：用
+`queryBroadcastReceivers(Intent("sdl.router.startservice"), 0)` 查结果，
+再和 `PackageInfo.receivers` 逐个比类名。
+
+**实测结论：我们的注册是对的**，设备上查得到：
+
+```
+$ adb shell cmd package query-receivers -a sdl.router.startservice
+1 receivers found:
+  name=com.xigaigai.syncglance.receiver.SdlReceiver
+  enabled=true exported=true       ← 与官方要求一致
+```
+
+`TransportConstants.START_ROUTER_SERVICE_ACTION` 的值也确认是
+`"sdl.router.startservice"`（与 Manifest 一致）。
+
+所以这个 ✕ 是**校验器在自己进程内查询时的判定问题**（debug 包 + 该 ROM 的
+查询可见性差异），不是配置错误。判断要点：
+
+- 只在 **debug 包**出现（`DebugTool` 由 `FLAG_DEBUGGABLE` 决定，release 不跑）
+- **只影响首次调用**：2 秒后的重试就成功了（见 §5.8.1 的失败重试）
+- 真实补连接不依赖这个检查（它内部找的是 RouterService，不是 receiver）
+
+> 结论：看到这个 ✕ **不要**去改 Manifest 的 receiver 声明，先按上面三条排除。
+
+
 ### 5.9 与官方 Integration Basics - Java 的逐条对照
 
 官方文档：[Integration Basics - Java](https://smartdevicelink.com/en/guides/android/getting-started/integration-basics-java/)
