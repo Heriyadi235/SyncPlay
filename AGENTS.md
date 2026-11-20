@@ -99,7 +99,7 @@
   `legacy/sdl4` 分支仍保持 32，别把两边的结论混用。
 - 只有 `HMI_FULL` 才能发 RPC
 - `appName` 一旦定下**永不改**（车机按它查策略表）
-- 一行只有 **7 个汉字 = 14 半角**；时钟格没有小时位
+- 一行只有 **7 个汉字 = 14 半角**（屏幕容量；协议 width=40 只是上限，见 6.2）；时钟格没有小时位
 - 车机字库不认 ⧗ ▶ ⏸ 与箭头
 
 ---
@@ -115,7 +115,10 @@
 
 > **规则：凡是与这两份报文冲突的说法，一律以报文为准。**
 > 历史上 `SYNC1.1-AppLink开发总纲.md` / 固件逆向笔记里有多处结论已被实车推翻
-> （如"语言是 EN-GB"、"软键必须用 AddCommand"、"PLAY_PAUSE 可订阅"、"ScrollableMessage 没有 timeout 字段"）。
+> （如"语言是 EN-GB"、"软键必须用 AddCommand"、"ScrollableMessage 没有 timeout 字段"）。
+>
+> **唯一的例外**：报文里 `buttonCapabilities` 少了 `PLAY_PAUSE`（见 6.3），
+> 那是那次 dump 的缺项，以能力清单/实测按键事件为准。
 
 ### 6.1 基本身份
 
@@ -133,10 +136,19 @@
 | `presetBankCapabilities.onScreenPresetsAvailable` | **false**（没有屏上预设库） |
 | `iconResumed` | false |
 
-### 6.2 文本字段（16 个，`width` 是假的）
+### 6.2 文本字段（16 个；`width` 是**协议上限**，不是屏幕容量）
 
-全部 `rows=1`、`characterSet=CID1SET`。`width=40` **不代表能显示 40 个字符**——
-实车实测一行只有 **7 个汉字 = 14 半角**（见 README 硬约束）。
+全部 `rows=1`、`characterSet=CID1SET`。
+
+**`width=40` 的准确含义**：PRC 参数允许这个字段最长 40 个字符，
+这是**协议层的上限**（写超了才会被拒），**不代表屏幕能显示 40 个字符**。
+本车机一行实测只装得下 **7 个汉字 = 14 个半角**，超出的部分会被截断；
+有的车机会用滚动的方式把长文本显示出来（本机没观察到滚动）。
+
+两个约束要同时满足：
+
+- **写多长不会被协议拒绝** → 看 `width`（40）
+- **写多长才看得见** → 看屏幕（7 汉字 / 14 半角），排版一律按这个来
 
 ```
 mainField1  mainField2  mainField3  mainField4
@@ -148,19 +160,29 @@ audioPassThruDisplayText1  audioPassThruDisplayText2
 sliderHeader  sliderFooter
 ```
 
-### 6.3 物理按键：**13 个，没有 PLAY_PAUSE**
+### 6.3 物理按键：**清单里有 PLAY_PAUSE，只是我们不用它**
+
+能力清单里的按键：
 
 ```
-OK, SEEKLEFT, SEEKRIGHT, PRESET_0 … PRESET_9
+OK  SEEKLEFT  SEEKRIGHT  PRESET_0 … PRESET_9  PLAY_PAUSE
 ```
 
-- 全部 `shortPressAvailable = longPressAvailable = upDownAvailable = true`
-- **`PLAY_PAUSE` 不在列表里**（旧文档说车机声明了两次，是错的）。
-  所以 `subscribeAllKeys()` 跳过它是**正确行为**，不要"修"。
-- OK 与 PLAY_PAUSE 是同一物理键的说法来自旧笔记，报文里只有 OK；
-  现有的别名去重逻辑保留无害，但不要指望收到 `PLAY_PAUSE` 事件。
+（`PLAY_PAUSE` 出现过重复声明；全部 `shortPressAvailable = longPressAvailable = upDownAvailable = true`）
 
-### 6.4 软键能力
+- **`PLAY_PAUSE` 是有的**。旧说法"车机没声明 PLAY_PAUSE"是错的，已纠正。
+- **`OK` 与 `PLAY_PAUSE` 对应同一个物理键**：按一次这个键会**同时**收到两条
+  `OnButtonPress`（`OK` 和 `PLAY_PAUSE`，间隔 5~11ms）。
+- 因为这两个事件同时触发，**本项目主动不使用 `PLAY_PAUSE`** ——
+  所以 `subscribeAllKeys()` 跳过它是**有意的取舍**，别当成 bug 去"修"。
+- 若将来真要订阅它：必须做「同一物理键别名去重」（200ms 窗口内后到的丢弃），
+  且**不能**按 cmdID 通用去抖 —— 那会把用户快速连按同一个键也吃掉。
+- **不支持**：`TUNEUP` / `TUNEDOWN`（返回 `UNSUPPORTED_RESOURCE`）
+- ⚠️ 材料不一致的实情：`docs/车机能力说明报文.txt`（某次 `RegisterAppInterface`
+  Response 原文）的 `buttonCapabilities` 只有 13 条、缺 `PLAY_PAUSE`。
+  那份是 dump 时的缺项，**以能力清单和实测按键事件为准**。
+
+### 6.4 软键能力：最多 8 个，每屏 4 个槽
 
 ```
 softButtonCapabilities: 1 条
@@ -170,8 +192,19 @@ softButtonCapabilities: 1 条
   imageSupported      = true（但 graphicSupported=false，图片实际用不了）
 ```
 
-→ 软键只能是**纯文本**、只支持**短按**；`Show.softButtons` 的 `softButtonID` 靠
-`OnButtonPress{CUSTOM_BUTTON, customButtonID}` 回调（实车已验证 id=9001）。
+→ 软键只能是**纯文本**、只支持**短按**。
+
+**排版规则（实车结论）**：
+
+- **最多支持 8 个软键**
+- 每屏 **4 个槽位**
+- **最后一个槽固定是「打开菜单」**，不可定制
+- **最右侧那个按键始终是翻页键**
+- 所以：**不翻页时最多注册 3 个软键**（第 4 格是菜单）；
+  **需要翻页时最多注册 8 个**（车机自动分页，最右侧让给翻页键）
+
+回调：`OnButtonPress { buttonName: CUSTOM_BUTTON, customButtonID }`（实车已验证 id=9001）。
+
 
 ### 6.5 可用 RPC：43 个，其余一律不可用
 
@@ -226,7 +259,7 @@ OnKeyboardInput  OnTouchEvent  OnWayPointChange
 | `AddCommand` | `vrCommands` 不能是空串，也不能全是空串 |
 | `SetGlobalProperties` | `TTSChunk` 必须带 `name` 字段 |
 | `Show` | 覆盖式：不带 `softButtons` 上一次的按钮就消失；`setMediaTrack("")` 才能真正清空 |
-
+| `Show.softButtons` | 最多 **8 个**；不翻页时最多只能注册 **3 个**（第 4 格固定是「打开菜单」，最右侧是翻页键），见 6.4 |
 
 ---
 
