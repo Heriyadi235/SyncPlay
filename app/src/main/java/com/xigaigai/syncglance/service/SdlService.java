@@ -46,7 +46,7 @@ import java.util.Vector;
  * 这台车的显示规则（一行 14 半角、mediaTrack 单值共用、ETA 借 mm:ss 位…）
  * 都是实车倒推出来的，需要字节级控制权和「看到发出去的原始载荷」的能力。
  */
-public class SdlService extends Service implements NotificationCatcher.MusicListener {
+public class SdlService extends Service {
 
     private static final String TAG = "SYNC";
     private static final String CHANNEL_ID = "syncglance";
@@ -86,12 +86,10 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
     /** 连接代际：每次 startProxy 自增，用来忽略旧连接对象迟到的回调 */
     private volatile long generation = 0;
     private int corrId = 1;
-    /** 上一次记进日志的导航摘要（只用于日志降噪，不影响逻辑） */
-    private String lastNavLog;
 
     private final Handler main = new Handler(Looper.getMainLooper());
+    /** 渲染器与生命周期都来自 SyncCore（应用级），这里只是引用 */
     private StateRenderer renderer;
-    private LyricManager lyricManager;
     private SyncLifecycle lifecycle = new SyncLifecycle();
     private boolean menusBuilt = false;
 
@@ -100,9 +98,9 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
     public SyncLifecycle getLifecycle() { return lifecycle; }
     public StateRenderer getRenderer() { return renderer; }
 
-    /** 当前歌词（给屏幕预览用） */
+    /** 当前歌词（给屏幕预览用）—— 数据源在 SyncCore */
     public java.util.List<com.xigaigai.syncglance.lyric.Lrc.Line> getLyrics() {
-        return lyricManager == null ? null : lyricManager.getCurrent();
+        return com.xigaigai.syncglance.core.SyncCore.get().lyrics();
     }
 
     /**
@@ -113,10 +111,7 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
      * 内存缓存命中会立刻同步回调，不会重新联网。
      */
     public void reloadLyrics() {
-        if (lyricManager == null || renderer == null) return;
-        NowPlaying np = renderer.getSong();
-        if (np == null) return;
-        lyricManager.load(np, (song, lines) -> renderer.setLyrics(lines));
+        com.xigaigai.syncglance.core.SyncCore.get().reloadLyrics();
     }
 
     /** 当前歌曲的显示文字，没有就返回 null */
@@ -137,53 +132,26 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         instance = this;
         Log2.init(this);
 
-        renderer = new StateRenderer();
-        renderer.setLifecycle(lifecycle);
-        lyricManager = new LyricManager(
-                new java.io.File(getCacheDir(), "lyrics"));
+        /*
+         * ★ 数据采集与渲染状态都归 SyncCore 管（应用级单例，由 SyncGlanceApp 初始化）。
+         *
+         *   SdlService 只负责「连接 + 发送」：
+         *     连上  → attachSender()，渲染器的出站 RPC 就能送出去
+         *     断开  → detachSender()，渲染与预览照常工作
+         *
+         *   这样即使服务因为「没连车机」而退出（SDL 5.x 的正常语义），
+         *   界面上的车机预览也不会变成空画布。
+         */
+        com.xigaigai.syncglance.core.SyncCore core =
+                com.xigaigai.syncglance.core.SyncCore.get();
+        core.init(this);
+        core.setOnDataChanged(this::updateNotification);
+        renderer = core.renderer();
+        lifecycle = core.lifecycle();
 
         createChannel();
 
-        // 通知监听 → 歌曲数据
-        NotificationCatcher.setMusicListener(this);
-
-        // ★ 自动拉起已按要求关闭
-        //   高德由用户手动打开（或点「高德地图」按钮），网易云不主动拉起
-        // main.postDelayed(this::launchCompanionApps, 1500);
-
-        // ★ 高德导航数据：只走 AmapLink 这条主路径
-        //   （广播握手已移除，手机版高德本来也不发导航广播）
-        com.xigaigai.syncglance.nav.AmapLinkClient.setNavListener(nav -> {
-            if (nav == null) return;
-            if (nav.hasData()) {
-                /*
-                 * ★ 必须走 SdlService.setNavigation()，不能直接调 renderer。
-                 *
-                 *   两者差一个 pushClock() —— 那个才是把 ETA 时刻推给车机时钟格的唯一入口。
-                 *   以前这里直接 renderer.setNavigation(nav)，绕过了 pushClock，
-                 *   结果「导航中 ETA 永不刷新」：整个导航期间一条 SetMediaClockTimer 都没发出去。
-                 */
-                setNavigation(nav);
-
-                // 日志降噪：高德每秒都推，只在关键字段变化时记一条
-                String summary = nav.instruction + "|" + nav.road + "|"
-                        + nav.remainDistance + "|" + nav.etaClockNow();
-                if (!summary.equals(lastNavLog)) {
-                    lastNavLog = summary;
-                    Log2.i(TAG, "导航数据: " + nav);
-                }
-            } else {
-                // 空对象 = 导航结束/到达/高德退出
-                // 必须立刻清空并重绘，不能等下一次音乐通知
-                Log2.i(TAG, "导航已结束，立即降级显示");
-                lastNavLog = null;
-                renderer.clearNavigation();
-                renderer.markDirty("navEnd");
-            }
-        });
-        com.xigaigai.syncglance.nav.AmapLinkClient.get(this).start();
-
-        Log2.i(TAG, "SyncPlay 服务创建");
+        Log2.i(TAG, "SyncPlay 服务创建（连接层）");
     }
 
     /**
@@ -290,8 +258,15 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
 
     @Override
     public void onDestroy() {
-        Log2.i(TAG, "服务销毁");
-        NotificationCatcher.setMusicListener(null);
+        Log2.i(TAG, "服务销毁（连接层退出，数据采集与预览不受影响）");
+        /*
+         * ★ 这里绝对不能再 NotificationCatcher.setMusicListener(null)。
+         *
+         *   那个监听器现在是 SyncCore（应用级）注册的，服务只是"借用连接"。
+         *   服务一销毁就把它置空，等于把数据采集也掐死了：
+         *   界面上预览会一直停在「空闲 / 问候语」，歌曲永远进不来（踩过）。
+         */
+        com.xigaigai.syncglance.core.SyncCore.get().detachSender();
         disposing = true;
         SdlManager old = sdlManager;
         sdlManager = null;
@@ -477,8 +452,9 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
 
             sdlManager = builder.build();
             lifecycle.onProxyCreated();
-            // 屏幕渲染仍然走我们自己的发送管道（保住"看到真正发出去的载荷"这个调试能力）
-            renderer.setSender(msg -> sendRpc((RPCRequest) msg));
+            // 把发送通道挂到 SyncCore（渲染器与数据采集都在那边）
+            com.xigaigai.syncglance.core.SyncCore.get()
+                    .attachSender(msg -> sendRpc((RPCRequest) msg));
             sdlManager.start();
             updateNotification();
             Log2.i(TAG, "✓ SdlManager 已启动，等待车机连上并完成注册"
@@ -527,7 +503,7 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         disposing = true;                 // 告诉 onDestroy()：这是我们主动拆的，别重复收尾
         SdlManager old = sdlManager;
         sdlManager = null;
-        renderer.setSender(null);
+        com.xigaigai.syncglance.core.SyncCore.get().detachSender();
         if (old != null) {
             try { old.dispose(); } catch (Exception ignored) { }
         }
@@ -871,64 +847,17 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
 
     // ---------------- 数据入口 ----------------
 
-    /** 来自 NotificationCatcher 的歌曲更新 */
-    @Override
-    public void onNowPlaying(NowPlaying np) {
-        if (np == null) return;
-
-        NowPlaying cur = renderer.getSong();
-        boolean songChanged = cur == null || !np.sameSong(cur);
-
-        renderer.setSong(np);
-        updateNotification();
-
-        // 换歌了，重新拉歌词
-        if (songChanged) {
-            // ★ 先把上一首的歌词清掉：新歌词要查网络时可能要等几秒，
-            //   不清会拿新歌的播放进度去切旧歌的时间轴，显示出一段「时间错位」的歌词。
-            renderer.setLyrics(null);
-            lyricManager.load(np, (song, lines) -> renderer.setLyrics(lines));
-        }
-
-        // 用 SetMediaClockTimer 起一个播放计时（SYNC 规范做法）
-        pushClock();
-    }
-
-    /**
-     * 把「当前该显示的时间」推给车机。
-     *
-     * 调用点有三处：换歌、导航数据更新、计时器状态变化。
-     * 以前只在换歌时调，结果导航一路更新、ETA 却永远停在第一次推送的时刻。
-     *
-     * songClockRpc() 内部自带门槛（ETA 没变就不发、歌没换就不重发），
-     * 所以这里可以放心被高频调用。
+    /*
+     * 歌曲 / 导航的数据采集已经搬进 SyncCore（与连接解耦）：
+     *   - 通知监听  → SyncCore.musicListener
+     *   - 高德 AIDL → SyncCore.navListener
+     *   - 推送时钟  → SyncCore.pushClock()
+     * 服务这边只需要在需要时读 renderer，不再承担数据入口的职责。
      */
-    private void pushClock() {
-        SetMediaClockTimer clock = renderer.songClockRpc();
-        if (clock == null) return;
-        clock.setCorrelationID(nextCorr());
-        sendRpc(clock);
-    }
 
-    /**
-     * 音乐通知消失 —— 播放器退出，或用户把媒体控件划掉了。
-     *
-     * 此时不能继续挂着最后一首歌，要把歌曲状态整个清掉，
-     * 让屏幕退回「纯导航」或「欢迎页」。
-     */
-    @Override
-    public void onMusicGone() {
-        Log2.i(TAG, "音乐通知消失，清空歌曲状态并降级显示");
-        renderer.clearSong();
-        updateNotification();
-    }
-
-    /** 设置导航数据 */
+    /** 设置导航数据（外部手动调用时用；正常数据流走 SyncCore） */
     public void setNavigation(Navigation nav) {
-        renderer.setNavigation(nav);
-        // ★ 导航数据变了，ETA 也可能变了 —— 必须顺手推一次时钟，
-        //   否则到达时刻只会在换歌那一瞬间刷新。
-        pushClock();
+        com.xigaigai.syncglance.core.SyncCore.get().setNavigation(nav);
     }
 
     /** 手动切换导航模式 */
@@ -1275,7 +1204,7 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         menusBuilt = false;
         pendingTimerResend = true;
         renderer.onDisconnected();
-        renderer.setSender(null);
+        com.xigaigai.syncglance.core.SyncCore.get().detachSender();
 
         updateNotification();
         stopSelf();          // ★ 与官方一致：断开就退出，等广播链路重新拉起

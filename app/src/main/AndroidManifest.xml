@@ -56,17 +56,16 @@
     </queries>
 
     <application
+        android:name=".SyncGlanceApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.Light.DarkActionBar"
-        android:windowOptOutEdgeToEdgeEnforcement="true"
-        tools:targetApi="35">
-        <!-- ★ windowOptOutEdgeToEdgeEnforcement：targetSdk 35 在 Android 15 上强制 edge-to-edge，
-             我们的界面是简单的 ScrollView / 固定高度预览，先临时退出避免被系统栏遮挡。
-             正式适配（insets 处理）留作独立任务，做完把这一行去掉。 -->
+        android:theme="@style/Theme.SyncGlance">
+        <!-- 主题见 res/values/themes.xml：
+             自带 windowOptOutEdgeToEdgeEnforcement（targetSdk 35 的 edge-to-edge 开关）。
+             ★ 这个属性只能写在 style 里，写在本标签上不生效。 -->
 
         <activity
             android:name=".activity.MainActivity"

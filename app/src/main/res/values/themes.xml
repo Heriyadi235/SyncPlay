@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      项目主题。
+
+      为什么必须自己包一层：
+        targetSdk 35 在 Android 15 上**强制 edge-to-edge**，界面会延伸到系统栏区域，
+        结果 LogActivity 顶部那排按钮被 ActionBar 压住（实测）。
+        android:windowOptOutEdgeToEdgeEnforcement 是 **theme 属性** ——
+        写在 AndroidManifest 的 <application> 标签上是不生效的（踩过），必须放在 style 里。
+
+      将来要正式适配 edge-to-edge 时：把这个 item 删掉，
+      再给两个 Activity 的根布局做 insets 处理。
+    -->
+    <style name="Theme.SyncGlance" parent="Theme.AppCompat.Light.DarkActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement" tools:targetApi="35">true</item>
+    </style>
+
+</resources>

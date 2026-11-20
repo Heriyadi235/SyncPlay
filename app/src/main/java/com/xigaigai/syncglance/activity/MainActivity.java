@@ -20,6 +20,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.xigaigai.syncglance.R;
+import com.xigaigai.syncglance.core.SyncCore;
 import com.xigaigai.syncglance.display.CharProbe;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
@@ -397,37 +398,32 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 刷新状态栏。
+     *
+     * ★ 状态不再依赖 SdlService 是否存活：连接状态、媒体、导航分别来自
+     *   SyncCore.lifecycle() / renderer / AmapLinkClient，
+     *   服务退出（没连车机时 SDL 5.x 会这样）也照样能看到手机侧状态。
+     */
     private void refreshState() {
-        SdlService s = SdlService.getInstance();
+        SyncCore core = SyncCore.get();
         StringBuilder sb = new StringBuilder();
 
-        if (s == null) {
-            sb.append("连接：服务未启动\n");
-            sb.append("媒体：—\n");
-            sb.append("导航：—\n");
-        } else {
-            SyncLifecycle lc = s.getLifecycle();
-            sb.append("连接：").append(lc.describe()).append('\n');
+        sb.append("连接：").append(core.lifecycle().describe());
+        // SDL 服务是「连接 + 发送」的薄层，没连车机时它会自己退出，这里如实标出来
+        sb.append(SdlService.getInstance() == null ? "（服务未运行）" : "").append('\n');
 
-            // 媒体播放状态
-            sb.append("媒体：").append(mediaStatusText(s)).append('\n');
-
-            // 高德连接状态
-            AmapLinkClient amap = AmapLinkClient.get(this);
-            sb.append("导航：").append(amap.displayStatus()).append('\n');
-        }
+        sb.append("媒体：").append(mediaStatusText()).append('\n');
+        sb.append("导航：").append(AmapLinkClient.get(this).displayStatus()).append('\n');
 
         stateView.setText(sb.toString());
 
-        if (s != null && s.getRenderer() != null) {
-            updateSoftButtonLabel(s.getRenderer().getSoftKeyCount());
-        }
+        updateSoftButtonLabel(core.renderer().getSoftKeyCount());
     }
 
-    /** 媒体状态文字：歌名 / 歌手 [播放|暂停] */
-    private String mediaStatusText(SdlService s) {
-        com.xigaigai.syncglance.model.NowPlaying np =
-                s.getRenderer() == null ? null : s.getRenderer().getSong();
+    /** 媒体状态文字：歌名 / 歌手 [播放|暂停]（数据来自 SyncCore） */
+    private String mediaStatusText() {
+        com.xigaigai.syncglance.model.NowPlaying np = SyncCore.get().song();
         if (np == null || !np.hasData()) return "—";
 
         StringBuilder sb = new StringBuilder();

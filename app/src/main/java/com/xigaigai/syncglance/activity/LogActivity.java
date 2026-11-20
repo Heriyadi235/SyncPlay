@@ -15,6 +15,7 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.xigaigai.syncglance.R;
+import com.xigaigai.syncglance.core.SyncCore;
 import com.xigaigai.syncglance.display.ScreenPreviewView;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.nav.AmapLinkClient;
@@ -119,16 +120,21 @@ public class LogActivity extends AppCompatActivity {
         }
     }
 
-    /** 刷新车机屏幕预览 */
+    /**
+     * 刷新车机屏幕预览。
+     *
+     * ★ 不依赖 SdlService 是否存活：渲染器与数据采集都在 SyncCore（应用级），
+     *   所以「没连车机、服务已退出」时预览照样能显示手机上的歌曲/导航。
+     *   这是把预览器从连接层解耦后的直接收益。
+     */
     private void refreshPreview() {
         if (previewCtrl == null) return;
-        SdlService s = SdlService.getInstance();
-        if (s == null || s.getRenderer() == null) return;
 
-        StateRenderer r = s.getRenderer();
+        SyncCore core = SyncCore.get();
+        StateRenderer r = core.renderer();
 
         // ★ 只更新播放位置，不改歌曲身份
-        //   （整首替换会绕过 SdlService.onNowPlaying，导致歌词永远加载不到）
+        //   （整首替换会绕过 SyncCore 的换歌逻辑，导致歌词永远加载不到）
         NotificationCatcher nc = NotificationCatcher.getInstance();
         if (nc != null) {
             com.xigaigai.syncglance.model.NowPlaying latest = nc.pollNowPlaying();
@@ -137,12 +143,13 @@ public class LogActivity extends AppCompatActivity {
             }
         }
 
-        boolean connected = s.getLifecycle() != null && s.getLifecycle().canSendRpc();
+        // 标题栏显示的「已连接 / 未连接」看的是 HMI 等级，不是发送通道在不在
+        boolean connected = core.lifecycle().canSendRpc();
 
         previewCtrl.update(
                 r.currentState(),
                 r.getSong(),
-                s.getLyrics(),
+                core.lyrics(),
                 r.getNavigation(),
                 r.isTimerRunning(),
                 connected,
