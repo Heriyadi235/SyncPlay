@@ -27,9 +27,9 @@ import com.smartdevicelink.util.DebugTool;
 import com.smartdevicelink.util.SystemInfo;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
-import com.xigaigai.syncglance.lyric.LyricManager;
-import com.xigaigai.syncglance.model.Navigation;
+import com.xigaigai.syncglance.lyric.LyricManager;import com.xigaigai.syncglance.model.Navigation;
 import com.xigaigai.syncglance.model.NowPlaying;
+import com.xigaigai.syncglance.receiver.SyncRouterService;
 import com.xigaigai.syncglance.util.Log2;
 
 import java.util.Vector;
@@ -114,7 +114,12 @@ public class SdlService extends Service {
         com.xigaigai.syncglance.core.SyncCore.get().reloadLyrics();
     }
 
-    /** 当前歌曲的显示文字，没有就返回 null */
+    /**
+     * 当前歌曲的显示文字，没有就返回 null。
+     *
+     * ★ 只给日志/调试用 —— **不要往通知里塞**。通知只报状态枚举，
+     *   否则切歌、歌词变化都会刷通知栏（见 {@code notificationText()}）。
+     */
     public String nowPlayingText() {
         if (renderer == null) return null;
         com.xigaigai.syncglance.model.NowPlaying np = renderer.getSong();
@@ -150,8 +155,67 @@ public class SdlService extends Service {
         lifecycle = core.lifecycle();
 
         createChannel();
+        registerRouterWatcher();
 
         Log2.i(TAG, "SyncPlay 服务创建（连接层）");
+    }
+
+    // ---------------- RouterService 存活探测 ----------------
+
+    /** RouterService 是否在跑（由 {@link SyncRouterService} 在 onCreate/onDestroy 时广播上报） */
+    private volatile boolean routerAlive = false;
+
+    /**
+     * 这次进程起来之后，是否"连上过又断开了"。
+     *
+     * 用途：区分 {@code 未连接（连接关闭）} 和 {@code 未连接（等待车机）}——
+     * 前者说明车机本来是通的、刚掉线（多半熄火/蓝牙断）；后者说明压根没连上过。
+     */
+    private volatile boolean closedOnce = false;
+
+    private android.content.BroadcastReceiver routerWatcher;
+
+    /**
+     * 监听 RouterService 的生死。
+     *
+     * 为什么要自己上报：SDL 5.8 的 {@code SdlBroadcastReceiver} 里没有
+     * {@code isRouterServiceRunning()} 这类 API，库内部状态又不可靠；
+     * 而 RouterService 是我们自己的子类，加两行广播最准。
+     *
+     * 注意 RouterService 跑在独立进程（{@code com.smartdevicelink.router}），
+     * 所以这里必须用**跨进程广播**，不能指望共享内存。
+     */
+    private void registerRouterWatcher() {
+        if (routerWatcher != null) return;
+        routerWatcher = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent == null ? null : intent.getAction();
+                boolean alive = SyncRouterService.ACTION_ROUTER_ALIVE.equals(action);
+                if (alive == routerAlive) return;
+                routerAlive = alive;
+                Log2.i(TAG, "RouterService " + (alive ? "已启动" : "已退出") + "，刷新通知");
+                updateNotification();
+            }
+        };
+        android.content.IntentFilter f = new android.content.IntentFilter();
+        f.addAction(SyncRouterService.ACTION_ROUTER_ALIVE);
+        f.addAction(SyncRouterService.ACTION_ROUTER_DEAD);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(routerWatcher, f, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(routerWatcher, f);
+            }
+        } catch (Exception e) {
+            Log2.w(TAG, "注册 Router 状态广播失败: " + e.getMessage());
+        }
+    }
+
+    private void unregisterRouterWatcher() {
+        if (routerWatcher == null) return;
+        try { unregisterReceiver(routerWatcher); } catch (Exception ignored) { }
+        routerWatcher = null;
     }
 
     /**
@@ -259,6 +323,7 @@ public class SdlService extends Service {
     @Override
     public void onDestroy() {
         Log2.i(TAG, "服务销毁（连接层退出，数据采集与预览不受影响）");
+        unregisterRouterWatcher();
         /*
          * ★ 这里绝对不能再 NotificationCatcher.setMusicListener(null)。
          *
@@ -330,34 +395,21 @@ public class SdlService extends Service {
         return b.build();
     }
 
-    /** 通知副标题：跟着生命周期走 */
+    /**
+     * 通知副标题：只报**状态枚举**，绝不拼歌名/导航指令。
+     *
+     * 教训：以前这里是「显示中 · <歌名>」/「显示中 · <导航指令>」，
+     * 切歌、导航指令一变就刷一次通知栏，很吵。现在只在
+     * 「连接态 / HMI 等级 / 车机上显示什么类别 / Router 死活」变化时才变。
+     *
+     * 文案规则见 {@link com.xigaigai.syncglance.display.ConnectionStatus}。
+     */
     private String notificationText() {
-        if (lifecycle == null) return "正在启动…";
-        switch (lifecycle.getState()) {
-            case DISCONNECTED:
-                return "未连接 · 等待车机";
-            case CONNECTING:
-                return "已就绪 · 等待车机选中";
-            case NONE:
-                return "已连接 · 未选中";
-            case BACKGROUND:
-                return "已连接 · 后台";
-            case LIMITED:
-                return "已连接 · 受限";
-            case FULL: {
-                // 尽量带一点内容，扫一眼就知道在同步什么
-                com.xigaigai.syncglance.model.Navigation nav =
-                        renderer == null ? null : renderer.getNavigation();
-                if (nav != null && nav.hasData() && nav.instruction != null) {
-                    return "显示中 · " + nav.instruction;
-                }
-                String song = nowPlayingText();
-                if (song != null) return "显示中 · " + song;
-                return "显示中";
-            }
-            default:
-                return lifecycle.describe();
-        }
+        return com.xigaigai.syncglance.display.ConnectionStatus.text(
+                lifecycle == null ? null : lifecycle.getState(),
+                routerAlive,
+                closedOnce,
+                renderer == null ? null : renderer.currentState());
     }
 
     /** 状态变化时刷新通知。内容没变就跳过，省电。 */
@@ -902,6 +954,7 @@ public class SdlService extends Service {
                 lifecycle.canSendRpc());
 
         // 通知栏状态跟着走
+        closedOnce = false;        // 又连上了，"连接关闭"作废
         updateNotification();
 
         // 通知渲染器：连上/断开了都要重新评估能不能画
@@ -1203,6 +1256,16 @@ public class SdlService extends Service {
      */
     private void handleConnectionClosed() {
         Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），保留前台服务，等广播链路重连");
+        /*
+         * 「连接关闭」只在**真的跟车机对上过话**之后才成立。
+         *
+         * 停在 CONNECTING 就断的，说明 SdlManager 建好了但车机一条 OnHMIStatus 都没回
+         * （RouterService 没跑 / 车机没选中），这时报「未连接（连接关闭）」会误导 ——
+         * 让人以为刚才连通过。这种情况应该报「等待车机」。
+         */
+        SyncLifecycle.State beforeClose = lifecycle.getState();
+        closedOnce = beforeClose != SyncLifecycle.State.CONNECTING
+                && beforeClose != SyncLifecycle.State.DISCONNECTED;
         sdlManager = null;
         lifecycle.onProxyClosed();
         // 断开了，导航数据不用解码了（省 CPU）
