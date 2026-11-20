@@ -114,4 +114,27 @@ public class SyncLyricTest {
         assertFalse(SyncLyric.isPrebuilt(null));
         assertNull(SyncLyric.pageAt(null, 0));
     }
+
+    @Test
+    public void 成品缓存读写往返与签名校验() throws Exception {
+        java.io.File tmp = java.io.File.createTempFile("synclyric", ".lrc");
+        try {
+            String built = SyncLyric.build(SAMPLE);
+            assertNotNull(built);
+
+            SyncLyric.write(tmp, built);
+            List<Lrc.Line> back = SyncLyric.read(tmp);
+            assertNotNull("签名正确时应能读回", back);
+            assertEquals(Lrc.parse(built).size(), back.size());
+            assertTrue(SyncLyric.isPrebuilt(back));
+
+            // 签名被改 → 整份作废，必须返回 null（触发重建）
+            SyncLyric.write(tmp, "#syncglance sync-lyric v0; units=99\n"
+                    + "[00:01.000]x" + SyncLyric.SEP + "\n");
+            assertNull("签名不符必须作废", SyncLyric.read(tmp));
+        } finally {
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+        }
+    }
 }

@@ -68,10 +68,11 @@ dependencies {
     // 高德 Agent SDK（探测依赖是否可解析，暂不启用）
     // implementation("com.amap.lbs.client:amap-agent:1.1.41")
 
-    // ★ 日语分词器（歌词假名→罗马音需要词边界，见 docs/design.md「显示文本转写规范」）
-    //   包名是 org.atilika.kuromoji（groupId 才是 com.atilika）；
-    //   ipadic 版把 IPADIC 词典（12.7 MiB）直接打进 jar，从 classpath 资源加载，
-    //   无需外部文件、无需运行时下载。首次 build() 约 1~2 秒，之后复用。
+    // ★ 日语分词器（歌词假名→罗马音需要词边界，见 docs/design.md §2.5.1）
+    //   groupId 与包名都是 com.atilika.kuromoji；
+    //   ipadic 版把 IPADIC 词典直接打进 jar（原始 31.9 MB，压缩后仍占 APK 12.7 MB），
+    //   从 classpath 资源加载，无需外部文件、无需运行时下载。
+    //   首次 build() 约 1~2 秒，之后复用；初始化失败会自动降级为逐字转换。
     implementation("com.atilika.kuromoji:kuromoji-ipadic:0.9.0")
 
     // 单元测试（只进 testImplementation，不进 APK）
