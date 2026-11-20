@@ -16,6 +16,14 @@ public class NowPlaying {
     public boolean playing;
     /** 数据来源的 app 包名 */
     public String sourcePackage;
+    /**
+     * 媒体会话里的 METADATA_KEY_MEDIA_ID。
+     *
+     * 网易云播放时它就是网易云的 song id（例如 276235），可以直接查歌词，
+     * 完全绕开「搜索 + 猜」那一步。别的播放器这个字段含义各异，
+     * 所以用之前一定要拿返回结果反过来校验（见 NeteaseLyric.fetch）。
+     */
+    public String mediaId;
 
     public boolean hasData() {
         return notEmpty(title) || notEmpty(artist);
@@ -35,6 +43,7 @@ public class NowPlaying {
         positionMs = o.positionMs;
         playing = o.playing;
         sourcePackage = o.sourcePackage;
+        mediaId = o.mediaId;
     }
 
     private static boolean notEmpty(String s) { return s != null && !s.trim().isEmpty(); }

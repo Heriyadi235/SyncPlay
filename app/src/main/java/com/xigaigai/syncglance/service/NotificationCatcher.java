@@ -101,6 +101,7 @@ public class NotificationCatcher extends NotificationListenerService {
                 np.artist = str(md, MediaMetadata.METADATA_KEY_ARTIST);
                 np.durationMs = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
                 np.sourcePackage = sbn.getPackageName();
+                np.mediaId = str(md, MediaMetadata.METADATA_KEY_MEDIA_ID);
 
                 PlaybackState ps = c.getPlaybackState();
                 if (ps != null) {
@@ -386,6 +387,7 @@ public class NotificationCatcher extends NotificationListenerService {
             np.album = str(md, MediaMetadata.METADATA_KEY_ALBUM);
             np.durationMs = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
             np.sourcePackage = sbn.getPackageName();
+            np.mediaId = str(md, MediaMetadata.METADATA_KEY_MEDIA_ID);
 
             PlaybackState ps = target.getPlaybackState();
             if (ps != null) {

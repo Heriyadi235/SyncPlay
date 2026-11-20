@@ -168,9 +168,9 @@ public class LyricManager {
             // 前者绝不能写负缓存，否则一次断网会让这首歌"消失"六小时。
             boolean[] netError = {false};
 
-            // ③-A 网易云音乐
+            // ③-A 网易云音乐（先 MEDIA_ID 直取，再退搜索）
             try {
-                lrc = NeteaseLyric.fetch(song.title, song.artist, song.durationMs);
+                lrc = NeteaseLyric.fetch(song.mediaId, song.title, song.artist, song.durationMs);
                 if (lrc != null && !lrc.trim().isEmpty()) {
                     src = "网易云";
                 } else {
