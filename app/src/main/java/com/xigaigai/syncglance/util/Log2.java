@@ -40,7 +40,13 @@ public final class Log2 {
     private static final StringBuilder fullLog = new StringBuilder();
 
     private static Context appContext;
-    private static volatile boolean rawEnabled = false;
+    /**
+     * 原始 JSON 默认开启。
+     *
+     * 排查车机问题时，"到底发了什么/收到了什么"比什么都重要，
+     * 而车机上的行为往往无法复现，事后开关就晚了。
+     */
+    private static volatile boolean rawEnabled = true;
 
     private Log2() { }
 

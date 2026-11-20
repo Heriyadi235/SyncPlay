@@ -340,10 +340,8 @@ public class StateRenderer {
         if (nc == null) return;
         com.xigaigai.syncglance.model.NowPlaying latest = nc.pollNowPlaying();
         if (latest != null && latest.title != null && latest.title.equals(song.title)) {
-            // 打点：确认心跳在推进（排查歌词不滚动时打开 JSON 日志看这条）
-            if (Log2.isRawEnabled()) {
-                Log2.i(TAG, "位置 " + (latest.positionMs / 1000) + "s");
-            }
+            // 不在这里打日志：这是 900ms 一次的心跳，记下来纯噪音。
+            // 真要确认位置在推进，看 Show 里歌词的变化即可。
             updatePlaybackPosition(latest.positionMs, latest.playing);
         }
     }
@@ -713,9 +711,23 @@ public class StateRenderer {
 
         // 导航模式优先显示 ETA
         if (navClockText != null && !navClockText.isEmpty()) {
-            String last = lastClockTextSent;
-            if (navClockText.equals(last)) return null;
-            lastClockTextSent = navClockText;
+            // ★ 只有"确实要发出去"时才更新 lastClockTextSent。
+            //
+            //   以前的写法是先赋值、再检查，只要中间任一步 return（etaClockNow 取不到值、
+            //   ETA 恰好没变），这张"票"就被白白用掉了 —— 之后每次进来都在上一行
+            //   `navClockText.equals(last)` 处直接返回，ETA 永久卡死，直到导航结束。
+            //   实测就是这样：整个导航期间一条 SetMediaClockTimer 都没发出去。
+            if (navClockText.equals(lastClockTextSent)) return null;
+            if (nav == null) return null;
+
+            String clock = nav.etaClockNow();
+            if (clock == null) return null;          // 暂时拿不到到达时刻，下次再试，不消耗标记
+
+            if (!shouldResendEta(clock)) {
+                // ETA 时刻本身没变：记下当前值避免反复尝试，但等待它变化
+                lastClockTextSent = navClockText;
+                return null;
+            }
 
             // ★ 直接把到达时刻打在计时器上，然后让它停住。
             //
@@ -728,29 +740,22 @@ public class StateRenderer {
             //   所以只要 hours ≠ 0 车机就判 REJECTED（实测 16:21 连拒两次）。
             //   对策是把 hh:mm 拆成 minutes=hh、seconds=mm，
             //   车机会原样渲染成 "16:21"，正好是我们要的到达时刻。
-            //
-            //   只有 ETA 时刻本身变了才重发一次。
-            if (nav != null) {
-                String clock = nav.etaClockNow();
-                if (clock == null) return null;
-                if (!shouldResendEta(clock)) return null;
+            int h = 0, m = 0;
+            try {
+                int c = clock.indexOf(':');
+                h = Integer.parseInt(clock.substring(0, c));
+                m = Integer.parseInt(clock.substring(c + 1));
+            } catch (Exception ignored) { }
+            Log2.i(TAG, "计时器：显示到达时刻 " + clock
+                    + " → StartTime(0," + h + "," + m + ")（mm:ss 位）");
 
-                int h = 0, m = 0;
-                try {
-                    int c = clock.indexOf(':');
-                    h = Integer.parseInt(clock.substring(0, c));
-                    m = Integer.parseInt(clock.substring(c + 1));
-                } catch (Exception ignored) { }
-                Log2.i(TAG, "计时器：显示到达时刻 " + clock
-                        + " → StartTime(0," + h + "," + m + ")（mm:ss 位）");
+            SetMediaClockTimer t = new SetMediaClockTimer();
+            t.setStartTime(new StartTime(0, h, m));
+            t.setUpdateMode(UpdateMode.PAUSE);
+            t.setAudioStreamingIndicator(AudioStreamingIndicator.PLAY);
 
-                SetMediaClockTimer t = new SetMediaClockTimer();
-                t.setStartTime(new StartTime(0, h, m));
-                t.setUpdateMode(UpdateMode.PAUSE);
-                t.setAudioStreamingIndicator(AudioStreamingIndicator.PLAY);
-                return t;
-            }
-            return null;
+            lastClockTextSent = navClockText;        // ★ 真要发了才记
+            return t;
         }
 
         // 歌曲模式：从播放位置起表

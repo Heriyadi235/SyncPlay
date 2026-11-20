@@ -23,6 +23,7 @@ import com.smartdevicelink.proxy.rpc.enums.*;
 import com.smartdevicelink.proxy.rpc.listeners.OnRPCNotificationListener;
 import com.smartdevicelink.proxy.rpc.listeners.OnRPCResponseListener;
 import com.smartdevicelink.transport.MultiplexTransportConfig;
+import com.smartdevicelink.util.DebugTool;
 import com.smartdevicelink.util.SystemInfo;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
@@ -83,6 +84,8 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
     /** 连接代际：每次 startProxy 自增，用来忽略旧连接对象迟到的回调 */
     private volatile long generation = 0;
     private int corrId = 1;
+    /** 上一次记进日志的导航摘要（只用于日志降噪，不影响逻辑） */
+    private String lastNavLog;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private StateRenderer renderer;
@@ -137,12 +140,27 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         com.xigaigai.syncglance.nav.AmapLinkClient.setNavListener(nav -> {
             if (nav == null) return;
             if (nav.hasData()) {
-                Log2.i(TAG, "导航数据: " + nav);
-                renderer.setNavigation(nav);
+                /*
+                 * ★ 必须走 SdlService.setNavigation()，不能直接调 renderer。
+                 *
+                 *   两者差一个 pushClock() —— 那个才是把 ETA 时刻推给车机时钟格的唯一入口。
+                 *   以前这里直接 renderer.setNavigation(nav)，绕过了 pushClock，
+                 *   结果「导航中 ETA 永不刷新」：整个导航期间一条 SetMediaClockTimer 都没发出去。
+                 */
+                setNavigation(nav);
+
+                // 日志降噪：高德每秒都推，只在关键字段变化时记一条
+                String summary = nav.instruction + "|" + nav.road + "|"
+                        + nav.remainDistance + "|" + nav.etaClockNow();
+                if (!summary.equals(lastNavLog)) {
+                    lastNavLog = summary;
+                    Log2.i(TAG, "导航数据: " + nav);
+                }
             } else {
                 // 空对象 = 导航结束/到达/高德退出
                 // 必须立刻清空并重绘，不能等下一次音乐通知
                 Log2.i(TAG, "导航已结束，立即降级显示");
+                lastNavLog = null;
                 renderer.clearNavigation();
                 renderer.markDirty("navEnd");
             }
@@ -259,7 +277,6 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         Log2.i(TAG, "服务销毁");
         NotificationCatcher.setMusicListener(null);
         disposing = true;
-        main.removeCallbacks(retryConnect);
         SdlManager old = sdlManager;
         sdlManager = null;
         if (old != null) {
@@ -391,6 +408,22 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         if (sdlManager != null) return;
         try {
             /*
+             * ★ 打开 SDL 内部日志（仅 debug 包，与官方 hello_sdl 一致）。
+             *
+             *   这是唯一能看到 RAI / 传输层 / RouterService 内部过程的通道，
+             *   日志 tag 是 "SDL"，用 `adb logcat -s SDL:*` 抓。
+             *   我们自己的日志看不到这部分 —— 之前"卡在恢复连接"就是因为缺这份信息。
+             */
+            // 只有可调试包才开到 SDL 内部日志（AGP 8+ 默认不生成 BuildConfig，
+            // 所以用 ApplicationInfo 的 FLAG_DEBUGGABLE 判断，等价于 BuildConfig.DEBUG）
+            boolean debuggable = (getApplicationInfo().flags
+                    & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+            if (debuggable) {
+                DebugTool.enableDebugTool();
+                Log2.i(TAG, "SDL 内部日志已开启（logcat tag: SDL）");
+            }
+
+            /*
              * ★ 5.x 的建连入口：SdlManager。
              *
              *   与 4.12.2 的差异（逐条对应，别漏）：
@@ -476,8 +509,6 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
     public void resetProxy() {
         Log2.i(TAG, "重置连接");
         disposing = true;                 // 告诉 onDestroy()：这是我们主动拆的，别重复收尾
-        resetConnectRetries();
-        connectRetries = 0;
         SdlManager old = sdlManager;
         sdlManager = null;
         renderer.setSender(null);
@@ -564,7 +595,9 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
     public void sendScrollableTest(String body) {
         ScrollableMessage msg = new ScrollableMessage();
         msg.setScrollableMessageBody(body == null ? "" : body);
-        msg.setTimeout(20);              // 秒，车机会自动收起
+        msg.setTimeout(20000);           // ★ 单位是**毫秒**，不是秒。填 20 会被车机判
+                                         //   INVALID_DATA（.timeout out of range）—— 实测过。
+                                         //   20 秒后车机自动收起。
         msg.setCorrelationID(nextCorr());
         sendRpc(msg);
     }
@@ -930,7 +963,6 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
 
         if (lifecycle.justBecameFull(prev)) {
             Log2.i(TAG, "★ 进入 FULL —— 开始初始化");
-            resetConnectRetries();          // 连上了，重试计数清零
             initializeForConnection();
         } else if (lifecycle.justLostFocus(prev)) {
             // 文档 3.4.4.4：FULL/LIMITED 期间发起的操作会被车机自动终止
@@ -1198,13 +1230,19 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
 
     /**
      * 连接结束时的本地收尾（等价于 4.x 的 onProxyClosed）。
-     * 连接对象由 SDK 自己销毁，这里只清我们的状态，让重连能重建。
+     *
+     * ★ 完全照官方 hello_sdl 的做法：**收尾之后把 Service 停掉**（stopSelf）。
+     *   官方没有应用层重试 —— 重连靠 SDL 官方链路：
+     *     车机重连 → ACL_CONNECTED → SdlReceiver/SyncRouterService 起路由
+     *     → sdl.router.startservice / onSdlEnabled → 系统重新拉起本 Service → 重建 SdlManager
+     *
+     *   之前我们自己写了「每 5 秒重建、最多 12 次」的重试，反而会让车机侧
+     *   反复看到同一个 appName 的注册请求，卡在「恢复连接」不动。
      */
     private void handleConnectionClosed() {
-        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "）");
+        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），按官方语义停掉 Service");
         sdlManager = null;
         lifecycle.onProxyClosed();
-        updateNotification();
         // 断开了，导航数据不用解码了（省 CPU）
         com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(false);
         // 车机侧所有菜单/订阅都已被删除，重连要全量重建
@@ -1212,49 +1250,8 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         pendingTimerResend = true;
         renderer.onDisconnected();
         renderer.setSender(null);
-        scheduleRetryConnect();
-    }
 
-    // ---------------- 连接重试 ----------------
-
-    /**
-     * 5.x 与 4.x 的一个行为差异：**连不上就直接自毁**。
-     *
-     * 4.12.2 的 SdlProxy 建好后会一直挂着等车机；而 5.8.0 的 SdlManager
-     * 在拿不到可用传输（RouterService 还没起来 / 车机还没连）时会立刻 dispose。
-     * 实测本机（没连车机）启动后约 30ms 就收到 onDestroy。
-     *
-     * 这在车上会造成时序竞争：ACL_CONNECTED 把我们的 Service 拉起来时，
-     * RouterService 可能还没就绪 → manager 自毁 → 之后只能等 onSdlEnabled 再拉一次。
-     * 为了不把成败押在那个时序上，这里做一个有上限的退避重试：
-     * 只要还没进过 FULL，就每 5 秒重建一次，最多 12 次（约 1 分钟），
-     * 超过就停手，避免无限循环刷日志/耗电。
-     */
-    private static final int MAX_CONNECT_RETRIES = 12;
-    private static final long RETRY_CONNECT_MS = 5000;
-    private int connectRetries = 0;
-
-    private final Runnable retryConnect = () -> {
-        if (sdlManager != null) return;                       // 已经连上了
-        if (lifecycle.canSendRpc()) return;                    // 已经是 FULL
-        if (connectRetries >= MAX_CONNECT_RETRIES) {
-            Log2.w(TAG, "连接重试已达上限 " + MAX_CONNECT_RETRIES + " 次，停止（等蓝牙事件再拉）");
-            return;
-        }
-        connectRetries++;
-        Log2.i(TAG, "重建连接（第 " + connectRetries + "/" + MAX_CONNECT_RETRIES + " 次重试）");
-        startProxy();
-    };
-
-    private void scheduleRetryConnect() {
-        if (connectRetries >= MAX_CONNECT_RETRIES) return;
-        main.removeCallbacks(retryConnect);
-        main.postDelayed(retryConnect, RETRY_CONNECT_MS);
-    }
-
-    /** 连上之后把重试计数清零，下次断开重新给足机会 */
-    private void resetConnectRetries() {
-        connectRetries = 0;
-        main.removeCallbacks(retryConnect);
+        updateNotification();
+        stopSelf();          // ★ 与官方一致：断开就退出，等广播链路重新拉起
     }
 }

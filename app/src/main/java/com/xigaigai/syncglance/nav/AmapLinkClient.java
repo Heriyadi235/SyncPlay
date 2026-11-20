@@ -316,7 +316,11 @@ public class AmapLinkClient {
 
     private void retry(Attempt a, String reason) {
         if (closed || current != a) return;
-        Log2.w(TAG, reason + "；" + retryDelay() + "ms 后重试");
+        // 日志降噪：高德没启动时会连试 50 次，每次都打就是刷屏。
+        // 只留前 2 次、每 10 次、以及最后一次，足够看出在重试。
+        if (attempts <= 2 || attempts % 10 == 0 || attempts >= MAX_ATTEMPTS) {
+            Log2.w(TAG, reason + "；" + retryDelay() + "ms 后重试（" + attempts + "/" + MAX_ATTEMPTS + "）");
+        }
         a.retire();
         current = null;
         main.postDelayed(this::bind, retryDelay());

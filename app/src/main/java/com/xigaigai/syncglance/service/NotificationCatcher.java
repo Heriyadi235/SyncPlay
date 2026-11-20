@@ -401,7 +401,15 @@ public class NotificationCatcher extends NotificationListenerService {
             lastPlayingUpdateAt = System.currentTimeMillis();
             lastTitle = np.title;
 
-            Log2.i(TAG, "媒体会话: " + np);
+            // 日志降噪：通知每几秒就来一条，但歌名/歌手/播放态往往没变。
+            // 按「歌名|歌手|播放态|位置(10 秒粒度)」去重，只在真正变化时记一条。
+            String sig = np.title + "|" + np.artist + "|" + np.playing
+                    + "|" + (np.positionMs / 10_000);
+            if (!sig.equals(lastSessionLog)) {
+                lastSessionLog = sig;
+                Log2.i(TAG, "媒体会话: " + np);
+            }
+
             MusicListener l = musicListener;
             if (l != null) l.onNowPlaying(np);
 
@@ -414,6 +422,9 @@ public class NotificationCatcher extends NotificationListenerService {
     }
 
     private boolean dumpedMetadataOnce = false;
+
+    /** 上一次记进日志的媒体会话指纹（仅用于日志降噪） */
+    private String lastSessionLog;
 
     /** metadata 里有没有藏歌词？各家做法不统一，把已知 key 都列出来看 */
     private void dumpMetadataKeys(MediaMetadata md, Bundle notifExtras) {
