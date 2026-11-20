@@ -331,8 +331,8 @@ GET https://music.163.com/api/song/lyric?id=xxx&lv=1&kv=1&tv=-1
 
 | 项 | 内容 |
 |---|---|
-| 文件 | `<cacheDir>/lyrics/<md5>.v1-14x2.sync.lrc` |
-| 首行 | `#syncglance sync-lyric v1; units=14; pages=2; romaji=hepburn; caps=kana-seg` |
+| 文件 | `<cacheDir>/lyrics/<md5>.v2-14x2.sync.lrc` |
+| 首行 | `#syncglance sync-lyric v2; units=14; pages=2; romaji=hepburn; caps=kana-seg` |
 | 行格式 | `[mm:ss.mmm]第一行␟第二行` —— 每行是**一屏**，用 U+241F 分隔，第二行可为空 |
 | 失效 | 读取时逐字比对首行签名；规则版本 / 每行宽度 / 每屏行数任一变化即作废重建 |
 

@@ -688,7 +688,7 @@ private final Runnable positionTicker = ... // 构造时启动
 
 ---
 
-#### 4.5.4 完整的降级链
+#### 4.5.6 完整的降级链
 
 ```
 ① 内存缓存
@@ -707,8 +707,8 @@ private final Runnable positionTicker = ... // 构造时启动
 
 | 项 | 值 |
 |---|---|
-| 文件 | `<cacheDir>/lyrics/<md5>.v1-14x2.sync.lrc` |
-| 首行签名 | `#syncglance sync-lyric v1; units=14; pages=2; romaji=hepburn; caps=kana-seg` |
+| 文件 | `<cacheDir>/lyrics/<md5>.v2-14x2.sync.lrc` |
+| 首行签名 | `#syncglance sync-lyric v2; units=14; pages=2; romaji=hepburn; caps=kana-seg` |
 | 行格式 | `[mm:ss.mmm]第一行␟第二行`（每行 = 一屏，U+241F 分隔，第二行可为空） |
 | 失效 | 首行签名不一致 → 整份作废重建 |
 
@@ -747,6 +747,218 @@ IO 是单线程且请求不可取消。快速切歌 A→B→A 时，A 的旧网�
 - `LyricManager.lastHttpWasNetworkError` —— 同上，供 lrclib 各层使用
 
 只有**所有源都正常返回、确实没找到**时才写 `.none`。
+
+#### 4.5.7 模块结构与职责
+
+| 类 | 职责 | 关键方法 |
+|---|---|---|
+| `LyricManager` | 调度、四级缓存、请求序号 | `load()` / `buildSync()` / `apply()` / `cacheKey()` |
+| `SyncLyric` | 成品歌词的生成 / 读写 / 取屏 / 折行 | `build()` / `read()` / `write()` / `fileFor()` / `pageAt()` / `splitTwo()` |
+| `Romaji` | 假名→罗马音（kuromoji 分词 + 平文式） | `convert()` / `convertByTokens()` / `needSpace()` |
+| `Kana` | 假名罗马音底层表；旧逐字实现（降级兜底） | `romajiOfKana()` / `romajiLegacy()` |
+| `Lrc` | LRC 解析、半角宽度口径、**分页唯一实现** | `parse()` / `widthOf()` / `planPages()` / `paged()` |
+| `TitleNorm` | 只决定「怎么查」，不参与缓存身份 | `stripBrackets()` / `primaryArtist()` |
+| `NeteaseLyric` | 主源：搜索 + 拉 lrc + 候选打分 | `fetch()` / `pickBest()` |
+| `StateRenderer` | 取当前屏、0.5 秒提前量、900ms 心跳 | `computeLyricLines()` |
+| `SyncCore` / `SdlService` | 换歌入口、清旧歌词、「显示歌词」重载 | `onNowPlaying` / `reloadLyrics()` |
+
+依赖是单向无环的：
+
+```
+SdlService / SyncCore  →  LyricManager  →  { NeteaseLyric, SyncLyric, Romaji }  →  Lrc
+StateRenderer          →  { SyncLyric, Lrc }
+Romaji                 →  Kana（底层假名表）
+```
+
+> `Kana.romajiLegacy()` 只被 `Romaji` 的失败分支调用；业务代码不要直接用
+> `Kana.romajiSpaced()`（已标 `@Deprecated`，内部转发到 `Romaji.convert`）。
+
+**线程模型**：`current` / `currentKey` / `loadSeq` 只在主线程改；
+网络请求与成品生成跑在 `LyricManager` 的单线程 `ExecutorService`，结果通过
+`main.post` 回主线程再 `apply`。
+
+#### 4.5.8 一次换歌的完整时序
+
+```
+NotificationCatcher（每条通知都会触发）
+  → SyncCore.onNowPlaying(np)
+      songChanged = !np.sameSong(cur)        // 只比 title + artist，精确相等
+      renderer.setSong(np)
+      if (songChanged) {
+          renderer.setLyrics(null)           // ★ 先清掉上一首，防「新进度切旧时间轴」
+          lyricManager.load(np, cb)
+      }
+      pushClock()
+```
+
+`load()` 内部按顺序命中，命中即返回：
+
+| 顺序 | 条件 | 动作 | 回调 |
+|---|---|---|---|
+| 1 | 内存命中（`key == currentKey && current != null`） | 直接回调 | 主线程，同步 |
+| 2 | `<md5>.v2-14x2.sync.lrc` 存在且签名对 | 读成品 → `apply` | 主线程，同步 |
+| 3 | `<md5>.lrc` 存在 | 先显示原始歌词，再后台生成成品替换 | 同步 + 异步各一次 |
+| 4 | `<md5>.none` 未过期（6 小时） | 回调 null | 主线程，同步 |
+| 5 | 以上都没有 | 网络：网易云 → lrclib 三级 | io 线程，异步 |
+
+第 3 步会回调两次，**两次都带同一个 `seq`**：如果用户已经切歌，第二次会被序号拦掉。
+
+#### 4.5.9 成品歌词缓存（`.sync.lrc`）
+
+**为什么需要它**：转写要分词（kuromoji 首次 1~2 秒），折行/翻页也要算；
+而同一首歌的结果永远不变，没必要每帧重算。成品把「转写 + 折行 + 翻页」一次性做完。
+
+**文件名**：`<cacheDir>/lyrics/<md5>.v2-14x2.sync.lrc`
+
+`v2` 是规则版本，`14x2` 是「每行 14 半角 × 每屏 2 行」。**任一变化就换名字**，
+旧文件自然不再被读到，不需要写迁移代码。
+
+**首行签名**（读取时逐字比对）：
+
+```
+#syncglance sync-lyric v2; units=14; pages=2; romaji=hepburn; caps=kana-seg
+```
+
+**行格式**：
+
+```
+[01:23.456]第一行␟第二行
+```
+
+- 每行 = **一屏**，最多两行，用 `␟`（U+241F SYMBOL FOR UNIT SEPARATOR）分隔，
+  第二行可以为空，但分隔符一定在。
+- **不能用 `\u0001` 这类控制字符**：`Lrc.parse()` 对每行做 `trim()`，
+  trim 会吃掉 ≤U+0020 的字符——第二行为空时分隔符会被无声删除，
+  之后就分不清「成品」和「原始 LRC」了（踩坑记录 §8.22）。
+- 时间戳 = 这一屏**开始显示**的时刻；`planPages` 已把时间按字数比例算好。
+- 0.5 秒提前量**不写进文件**：它属于查询时的补偿，改它不用重建缓存。
+
+**生成**（`SyncLyric.build`，跑在 io 线程）：
+
+```
+Lrc.parse(原始 lrc)
+for 每句:
+    roma = Romaji.convert(text)
+    if 宽 ≤ 28  → 一屏
+    else        → Lrc.planPages(...) 逐屏
+    appendPage(时间, 屏文本)  // splitTwo 折成两行 + ␟ 拼接
+```
+
+一句都生成不出来 → 返回 null，调用方退回原始歌词。
+
+**读取**（`SyncLyric.read`）四道校验，任一不过都返回 null（触发重建）：
+
+1. 文件不存在
+2. 首行签名 ≠ 当前签名
+3. `Lrc.parse` 结果为空
+4. 没有任何一行含 `␟`
+
+**已知残留**：升级到 v2 后，旧的 `v1-14x2.sync.lrc` 不会被删除（项目还没有缓存清理机制），
+每首歌会多留几 KB。要清就 `rm -r cache/lyrics`。
+
+#### 4.5.10 显示时怎么取屏
+
+`StateRenderer.computeLyricLines(lyrics, positionMs)` 是实车与预览的**唯一入口**：
+
+```java
+long pos = positionMs + LYRIC_LEAD_MS;              // 0.5 秒提前量
+String[] ready = SyncLyric.pageAt(lyrics, pos);     // 成品：直接拆两行
+if (ready != null) { out[0] = ready[0]; out[1] = ready[1]; return out; }
+
+// 降级路径（没有成品时现场算）
+String[] page = Lrc.paged(lyrics, pos, 14, 2);
+return SyncLyric.splitTwo(Romaji.convert(page[0]).trim());
+```
+
+成品路径**零算力**：按时间找到当前行，再 `split('\u241F')`。
+降级路径只在「第一次播放、成品还没生成」的窗口里出现。
+
+#### 4.5.11 分页与折行算法
+
+**分页**：`Lrc.planPages(text, startMs, endMs, capacity)`（唯一实现，
+`Lrc.paged()` 与 `SyncLyric.build()` 共用）
+
+```
+宽 ≤ capacity → 单屏，起始 = startMs
+否则：
+    按 capacity 宽度切片（takeWidth），每片 trim，空片丢弃
+    每屏时长 ∝ 该屏宽度：elapsed += span × w_i / Σw
+    该屏起始 = startMs + elapsed
+```
+
+按字数比例而不是平均分：宽屏字多，理应停久；平均分会让只剩两三个字的末屏
+也占掉同样的时间。代价是极窄的一屏可能不足 1 秒（车机最快 1 秒刷一次）。
+
+**折行**：`SyncLyric.splitTwo(text)`，每屏最多两行、**每行 ≤14 半角**：
+
+```
+① 对半，但只在空格处断（中点向左 3 个字符内找空格）
+② 找不到空格（中点落在长单词里）→ 尽量填满第一行，仍然只在空格处断
+③ 整屏一个空格都没有（纯中文 / 一个超长单词）→ 按宽度硬切
+```
+
+不变量：两行都 ≤14，且不丢字（单测 `SyncLyricTest` 覆盖）。
+
+**已知局限**：翻页切片本身仍是「每屏 28 宽硬切」，所以长句的**翻页点**仍可能落在
+词中间（`KON|PYUUTAA`）；折行已经不会切断单词了。彻底修法见 `todo.md` 的 E 项。
+
+#### 4.5.12 转写引擎（`Romaji`）
+
+- 词边界由 **kuromoji（IPADIC）** 给，包名 `com.atilika.kuromoji`，
+  依赖 `com.atilika.kuromoji:kuromoji-ipadic:0.9.0`
+- 词典打在 jar 内（原始 31.9 MB，压缩后仍占 APK **12.7 MB**），
+  从 classpath 资源加载，**不联网、不需要外部文件**
+- **惰性初始化**：第一次遇到含假名的文本才 `new Tokenizer()`（约 1~2 秒），
+  发生在 io 线程（成品生成时），不阻塞首屏
+- 失败（老设备 OOM、资源缺失）→ 置 `sInitFailed`，本进程内降级
+  `Kana.romajiLegacy()`（旧的逐字空格），不再重试；显示链路不中断
+- **线程安全**：`Tokenizer` 不是线程安全的，`tokenize` 包在 `synchronized (tk)` 里
+- 结果进 **512 条 LRU**：`Show` 每几秒会重算歌名/导航，避免重复分词
+- **不含假名就原样返回**：中文、英文、德文不会被分词、也不会被加空格
+- 转写规则 R1~R9、平文式依据见 [design.md §2.5.1](design.md)
+
+词间距的判断（`Romaji.needSpace`，按优先级）：
+
+1. 标点紧贴前文；标点后空一格
+2. **接续助词**（词性 `助詞` + 二级 `接続助詞`）粘前一个词：
+   `いれ` + `ば` → `ireba`；`食べ` + `て` → `食べte`
+3. **送假名**：纯假名 token 紧跟汉字、且不是助词/助动词/接续词/感动词/记号 → 不空格：
+   `新` + `しい` → `新shii`
+4. 其余：词与词之间一个空格
+
+大小写按**词段**整体判定（片假名字符数 > 平假名 → 大写），不逐字符，
+避免 `KAr` 这种混排。
+
+#### 4.5.13 失败与降级矩阵
+
+| 失败点 | 处理 | 影响 |
+|---|---|---|
+| 网易云 HTTP 非 200 | 返回 null，**不算网络错误** | 继续 lrclib |
+| 网易云连接异常 | `lastWasNetworkError=true` | 继续 lrclib，**不写**负缓存 |
+| lrclib 404 | null，不算网络错误 | 三级全失败 → 写负缓存 |
+| lrclib 429 限流 | null，**置网络错误标志** | 不写负缓存（否则一次限流消失 6 小时） |
+| 拿到 lrc 但解析为空 | 视为「确实没有」 | 写负缓存 |
+| kuromoji 初始化失败 | `catch (Throwable)` 后降级 | 罗马音变逐字空格，仍能显示 |
+| 成品生成失败 | `build` 返回 null | 继续用原始歌词，本次不写成品 |
+| 成品损坏 / 签名不符 | `read` 返回 null | 重建 |
+| 旧请求迟到 | `seq != loadSeq` → 丢弃 | 不会覆盖当前歌曲 |
+| 断网且无缓存 | 回调 null | 显示「无歌词信息」，下次切歌重试 |
+
+#### 4.5.14 日志关键字速查（TAG = `Lyric` / `Romaji`）
+
+| 日志 | 含义 |
+|---|---|
+| `歌词就绪(内存 / 磁盘缓存 / 成品缓存 / 网易云 / lrclib)` | 正常，括号里是命中的那一层 |
+| `成品歌词就绪: <歌名> 共 N 屏` | 后台生成完成，下次直接读 |
+| `负缓存命中，跳过网络查询` | 6 小时内不再查；清 `cache/lyrics/*.none` 可强制重试 |
+| `网络异常导致无歌词，不写负缓存` | 断网，未污染缓存 |
+| `无歌词: 歌名 - 歌手` | 所有源都正常返回但确实没找到 |
+| `丢弃过期歌词(源)` | 快速切歌，旧结果被序号拦下 |
+| `kuromoji 就绪，耗时 Nms` | 分词器首次加载完成 |
+| `kuromoji 初始化失败，本进程内降级为逐字转换` | 词典加载失败，罗马音会变成逐字空格 |
+| `lrclib 命中(原名 / 剥括号 / 搜索)` | 命中哪一级 |
+| `网易云选中 id=... score=...` | 候选打分结果 |
+| `lrclib 搜索结果时长偏差 Ns，可能是错误版本` | 模糊搜索挑到的版本存疑 |
 
 ### 4.6 防刷屏节流
 
