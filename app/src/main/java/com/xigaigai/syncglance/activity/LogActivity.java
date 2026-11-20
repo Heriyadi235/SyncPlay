@@ -12,6 +12,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.xigaigai.syncglance.R;
@@ -91,18 +92,25 @@ public class LogActivity extends AppCompatActivity {
             if (autoRefresh) { refreshLog(); refreshPreview(); }
         });
 
-        // 始终解析导航包（不连车机也能测导航）
-        Button forceBtn = findViewById(R.id.btnForceParse);
-        forceBtn.setText("始终解析导航包：" + (AmapLinkClient.isForceParse() ? "开" : "关"));
-        forceBtn.setOnClickListener(v -> {
-            boolean on = !AmapLinkClient.isForceParse();
-            AmapLinkClient.setForceParse(on);
-            forceBtn.setText("始终解析导航包：" + (on ? "开" : "关"));
-            toast(on ? "已开启，未连车机也解析导航数据" : "已关闭");
-        });
+        // 清空歌词缓存：歌词匹配错了 / 负缓存把有歌词的歌锁死，都靠它强制重查
+        findViewById(R.id.btnClearLyricCache).setOnClickListener(v -> confirmClearLyricCache());
 
         refreshLog();
         refreshPreview();
+    }
+
+    /** 清空歌词缓存（二次确认，避免误触把几十首歌的缓存删了） */
+    private void confirmClearLyricCache() {
+        new AlertDialog.Builder(this)
+                .setTitle("清空歌词缓存")
+                .setMessage("会删除已缓存的歌词（含「无歌词」负缓存），并重新查询当前这首歌。\n不影响设置和其它数据。")
+                .setPositiveButton("清空", (d, w) -> {
+                    int removed = SyncCore.get().clearLyricCache();
+                    toast(removed > 0 ? "已清空 " + removed + " 个缓存文件，正在重查歌词"
+                                      : "缓存本来就是空的，已重新查询");
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void updateRawButton() {
@@ -162,12 +170,22 @@ public class LogActivity extends AppCompatActivity {
         super.onResume();
         autoRefresh = true;
         lastLength = -1;
+        /*
+         * ★ 信息页打开 = 用户正在看车机屏幕预览。
+         *
+         *   不是 HMI_FULL 的时候，导航包只在"有人看"的时候才解码 —— AES-GCM 是
+         *   CPU 大头，后台一直解密纯属浪费电。两页都不满足时仍然读 fd 并关闭，
+         *   只记心跳，不解密。（原来那个「始终解析导航包」开关就是干这个的，现已去掉）
+         */
+        AmapLinkClient.setPreviewVisible(true);
+        previewCtrl.render(SyncCore.get().renderer().getLastFrame());
         main.post(ticker);
     }
 
     @Override
     protected void onPause() {
         main.removeCallbacks(ticker);
+        AmapLinkClient.setPreviewVisible(false);
         super.onPause();
     }
 

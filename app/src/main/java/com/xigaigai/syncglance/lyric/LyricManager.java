@@ -78,6 +78,31 @@ public class LyricManager {
     public List<Lrc.Line> getCurrent() { return current; }
 
     /**
+     * 清空磁盘缓存（原始 .lrc、成品 .sync.lrc、负缓存 .none）并丢弃内存缓存。
+     *
+     * 用途：歌词匹配错了 / 版本判断错了 / 负缓存把一首其实有歌词的歌锁死 6 小时，
+     * 都可以用这个按钮强制重查，不用去手动清 App 数据。
+     *
+     * @return 删掉的文件个数
+     */
+    public int clearCache() {
+        // 请求序号自增：正在飞行的网络结果回来后会被判定过期，不会又写回缓存
+        loadSeq++;
+        current = null;
+        currentKey = null;
+
+        File[] files = cacheDir == null ? null : cacheDir.listFiles();
+        int removed = 0;
+        if (files != null) {
+            for (File f : files) {
+                if (f != null && f.isFile() && f.delete()) removed++;
+            }
+        }
+        Log2.i(TAG, "歌词缓存已清空，删除 " + removed + " 个文件");
+        return removed;
+    }
+
+    /**
      * 为一首歌请求歌词。已有缓存则同步回调，否则后台网络查询。
      *
      * 缓存层次（详见 docs/development.md 4.5.4）：

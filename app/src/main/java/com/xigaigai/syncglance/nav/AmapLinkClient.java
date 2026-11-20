@@ -97,23 +97,27 @@ public class AmapLinkClient {
     private static volatile boolean headUnitConnected = false;
 
     /**
-     * 强制解析开关。
+     * 预览页是否正被用户查看。
      *
-     * 默认关：没连车机时跳过解码省 CPU。
-     * 打开后：不管车机连不连都解码，方便在手机上测试导航功能。
+     * 解码（AES-GCM）是 CPU 大头，所以按需进行：
+     *   - 车机在 FULL → 一定要解码（数据要送到屏幕上）
+     *   - 否则 → 只有用户打开信息页（正在看车机屏幕预览）时才解码
+     * 两者都不成立时仍然读取并关闭 fd（避免泄漏），但只记心跳不解密。
      */
-    private static volatile boolean forceParse = false;
+    private static volatile boolean previewVisible = false;
 
-    public static void setForceParse(boolean on) {
-        forceParse = on;
-        Log2.i(TAG, "强制解析导航包：" + (on ? "开" : "关"));
+    /** 信息页 onResume/onPause 里调用 */
+    public static void setPreviewVisible(boolean visible) {
+        if (previewVisible == visible) return;
+        previewVisible = visible;
+        Log2.i(TAG, "预览页" + (visible ? "已打开（非 FULL 时开始解析导航包）" : "已关闭（非 FULL 时停止解析）"));
     }
 
-    public static boolean isForceParse() { return forceParse; }
+    public static boolean isPreviewVisible() { return previewVisible; }
 
-    /** 是否应该解码（车机连着，或者开了强制解析） */
+    /** 是否应该解码（车机连着，或者用户正在看预览页） */
     private static boolean shouldDecode() {
-        return headUnitConnected || forceParse;
+        return headUnitConnected || previewVisible;
     }
 
     public static void setHeadUnitConnected(boolean connected) {
@@ -259,7 +263,8 @@ public class AmapLinkClient {
     public void wakeUp() {
         synchronized (this) {
             if (registered) {
-                Log2.i(TAG, "已连接，无需重连");
+                // 已连接就静默返回：这个方法是"高德发了条通知"触发的，会非常频繁，
+                // 每次打一条日志就是刷屏（用户明确要求只保留成功/失败）
                 return;
             }
             if (closed) {
@@ -267,8 +272,7 @@ public class AmapLinkClient {
                 closed = false;
             }
             if (current != null) {
-                Log2.i(TAG, "正在连接中，忽略唤醒");
-                return;
+                return;        // 正在连接中，静默忽略
             }
             attempts = 0;      // 重置重试计数
         }
@@ -304,8 +308,6 @@ public class AmapLinkClient {
                 a.bound = false;
             }
 
-            Log2.i(TAG, "bind=" + a.bound + " 第 " + attempts + " 次尝试");
-
             if (a.bound) {
                 main.postDelayed(a.watchdog, WATCHDOG_MS);
             } else {
@@ -316,11 +318,13 @@ public class AmapLinkClient {
 
     private void retry(Attempt a, String reason) {
         if (closed || current != a) return;
-        // 日志降噪：高德没启动时会连试 50 次，每次都打就是刷屏。
-        // 只留前 2 次、每 10 次、以及最后一次，足够看出在重试。
-        if (attempts <= 2 || attempts % 10 == 0 || attempts >= MAX_ATTEMPTS) {
-            Log2.w(TAG, reason + "；" + retryDelay() + "ms 后重试（" + attempts + "/" + MAX_ATTEMPTS + "）");
-        }
+        /*
+         * 重试过程不打日志。
+         *
+         * 高德没启动时会连试 50 次（约 100 秒），每次一条就是刷屏；
+         * 用户只需要知道「连上了」或者「试满 50 次还是连不上」。
+         * 后者在 bind() 开头那次 beginAttempt() 失败时已经有一条汇总日志。
+         */
         a.retire();
         current = null;
         main.postDelayed(this::bind, retryDelay());

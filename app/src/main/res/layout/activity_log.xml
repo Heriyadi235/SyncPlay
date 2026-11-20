@@ -61,12 +61,14 @@
             android:text="暂停刷新"
             android:textSize="12sp" />
 
+        <!-- 清空歌词缓存：歌词匹配错了 / 负缓存锁死时用来强制重查。
+             （原来的「始终解析导航包」已删除：现在非 FULL 时，只在信息页可见时解析） -->
         <Button
-            android:id="@+id/btnForceParse"
+            android:id="@+id/btnClearLyricCache"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="始终解析导航包：关"
+            android:text="清空歌词缓存"
             android:textSize="12sp" />
     </LinearLayout>
 

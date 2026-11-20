@@ -177,6 +177,19 @@ public final class SyncCore {
     }
 
     /**
+     * 清空歌词缓存并强制重新查一次当前这首歌。
+     *
+     * @return 删掉的文件个数
+     */
+    public int clearLyricCache() {
+        int removed = lyricManager == null ? 0 : lyricManager.clearCache();
+        // 屏上的旧歌词也要清掉，否则看起来像"没反应"
+        renderer.setLyrics(null);
+        reloadLyrics();
+        return removed;
+    }
+
+    /**
      * 把「当前该显示的时间」推给车机。
      *
      * songClockRpc() 内部自带门槛（ETA 没变就不发、歌没换就不重发），
