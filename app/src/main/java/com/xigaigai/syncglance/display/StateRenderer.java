@@ -3,7 +3,7 @@ package com.xigaigai.syncglance.display;
 import android.os.Handler;
 import android.os.Looper;
 
-import com.smartdevicelink.proxy.SdlProxyALM;
+import com.smartdevicelink.proxy.RPCMessage;
 import com.smartdevicelink.proxy.rpc.SetMediaClockTimer;
 import com.smartdevicelink.proxy.rpc.SoftButton;
 import com.smartdevicelink.proxy.rpc.StartTime;
@@ -60,7 +60,19 @@ public class StateRenderer {
 
     private final Handler main = new Handler(Looper.getMainLooper());
 
-    private SdlProxyALM proxy;
+    /**
+     * 发送出口。
+     *
+     * ★ 迁移 SDL 5.x 后不再直接持有 proxy 对象 —— 4.x 的 {@code SdlProxyALM}
+     *   在 5.x 已被移除。这里只保留"把一条 RPC 交出去"的能力，
+     *   真正的发送（HMI 门控、日志、响应回调）仍然在 {@code SdlService.sendRpc()} 里，
+     *   这样"看到真正发出去的载荷"这个调试能力不会丢。
+     */
+    public interface Sender {
+        void send(RPCMessage msg);
+    }
+
+    private Sender sender;
     private SyncLifecycle lifecycle;
 
     // ---- 数据源 ----
@@ -142,7 +154,7 @@ public class StateRenderer {
             if (!dirty) return;
 
             // ★ 生命周期检查：非 FULL 一律不发送
-            if (proxy == null || lifecycle == null || !lifecycle.canSendRpc()) {
+            if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) {
                 if (!warnedNotFull) {
                     warnedNotFull = true;
                     Log2.i(TAG, "暂不刷新（" +
@@ -200,8 +212,8 @@ public class StateRenderer {
         }
     };
 
-    public void setProxy(SdlProxyALM p) {
-        this.proxy = p;
+    public void setSender(Sender s) {
+        this.sender = s;
         dirty = true;
         schedule();
     }
@@ -376,7 +388,7 @@ public class StateRenderer {
     // ---------------- 真正发 Show ----------------
 
     private void doShow() {
-        if (proxy == null) {
+        if (sender == null) {
             dirty = true;
             return;
         }
@@ -533,7 +545,7 @@ public class StateRenderer {
         }
 
         try {
-            proxy.sendRPCRequest(s);
+            sender.send(s);
             lastShowAt = System.currentTimeMillis();
             lastPayload = payload;
             dirty = false;
@@ -697,7 +709,7 @@ public class StateRenderer {
      */
     public SetMediaClockTimer songClockRpc() {
         if (timerRunning) return null;
-        if (proxy == null) return null;
+        if (sender == null) return null;
 
         // 导航模式优先显示 ETA
         if (navClockText != null && !navClockText.isEmpty()) {

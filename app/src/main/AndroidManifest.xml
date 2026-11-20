@@ -10,9 +10,13 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 蓝牙（Android 12+ 权限拆分） -->
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <!-- 蓝牙（Android 12+ 权限拆分）
+         ★ 5.x 的 IntegrationValidator 会用当前 SDK 实际授予的权限去校验，
+           带 maxSdkVersion="30" 会在 Android 13+ 上被判成"缺少 BLUETOOTH"，
+           进而让 queryForConnectedService / SdlBroadcastReceiver 的检查直接失败。
+           所以这里不给 maxSdkVersion（4.x 时没这个检查，5.x 必须去掉）。 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
 
@@ -35,6 +39,14 @@
         <package android:name="com.autonavi.minimap" />
         <intent>
             <action android:name="com.autonavi.minimap.service.NAVIGATION_SERVICE" />
+        </intent>
+        <!-- ★ SDL 5.x 必须：否则看不到 / 查不到自己的 RouterService，
+             表现为 SdlManager 建好就立刻自毁、SyncRouterService 根本不起进程 -->
+        <intent>
+            <action android:name="com.smartdevicelink.router.service" />
+        </intent>
+        <intent>
+            <action android:name="sdl.router.startservice" />
         </intent>
     </queries>
 
@@ -82,17 +94,35 @@
              因为没有任何东西在车机连接窗口期里监听 RFCOMM。 -->
         <service
             android:name=".receiver.SyncRouterService"
-            android:exported="true">
+            android:exported="true"
+            android:process="com.smartdevicelink.router"
+            android:foregroundServiceType="connectedDevice">
             <intent-filter>
                 <action android:name="com.smartdevicelink.router.service" />
             </intent-filter>
+            <!-- ★ 5.x 官方集成要求：缺这两行 meta-data，RouterService 起来也会被判非法，
+                 进而让 SdlManager 一建好就自毁（无车机时表现为立刻"连接结束"）。
+                 资源由 SDL 库提供，不要改成裸字符串。 -->
+            <meta-data
+                android:name="@string/sdl_router_service_version_name"
+                android:value="@integer/sdl_router_service_version_value" />
         </service>
 
         <receiver
             android:name=".receiver.SdlReceiver"
             android:exported="true">
+            <!-- ★ 5.x 的 IntegrationValidator 会拿 sdl.router.startservice 去
+                 queryBroadcastReceivers 找本应用的 SDL receiver，找不到就判失败，
+                 进而让 queryForConnectedService 抛异常。
+                 这条 action 也是「RouterService 反过来唤醒应用进程」的通道，
+                 4.x 时我们漏了它，等于那条唤醒链路一直是死的。 -->
             <intent-filter>
                 <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="sdl.router.startservice" />
+            </intent-filter>
+            <!-- ★ PACKAGE_* 必须单独一组：<data> 会把同组所有 action 都要求带 package: 的 data，
+                 混在一起会让 ACL_CONNECTED 永远匹配不到。 -->
+            <intent-filter>
                 <action android:name="android.intent.action.PACKAGE_ADDED" />
                 <action android:name="android.intent.action.PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.PACKAGE_REMOVED" />

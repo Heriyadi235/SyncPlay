@@ -11,16 +11,19 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 
-import com.smartdevicelink.exception.SdlException;
+import com.smartdevicelink.managers.SdlManager;
+import com.smartdevicelink.managers.SdlManagerListener;
+import com.smartdevicelink.managers.lifecycle.LifecycleConfigurationUpdate;
+import com.smartdevicelink.protocol.enums.FunctionID;
+import com.smartdevicelink.proxy.RPCNotification;
 import com.smartdevicelink.proxy.RPCRequest;
-import com.smartdevicelink.proxy.SdlProxyALM;
-import com.smartdevicelink.proxy.SdlProxyBuilder;
-import com.smartdevicelink.proxy.callbacks.OnServiceEnded;
-import com.smartdevicelink.proxy.callbacks.OnServiceNACKed;
-import com.smartdevicelink.proxy.interfaces.IProxyListenerALM;
+import com.smartdevicelink.proxy.RPCResponse;
 import com.smartdevicelink.proxy.rpc.*;
 import com.smartdevicelink.proxy.rpc.enums.*;
+import com.smartdevicelink.proxy.rpc.listeners.OnRPCNotificationListener;
+import com.smartdevicelink.proxy.rpc.listeners.OnRPCResponseListener;
 import com.smartdevicelink.transport.MultiplexTransportConfig;
+import com.smartdevicelink.util.SystemInfo;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
 import com.xigaigai.syncglance.lyric.LyricManager;
@@ -33,45 +36,52 @@ import java.util.Vector;
 /**
  * SyncGlance 的 SDL 服务。
  *
- * 与 AppLinkPro 相同的骨架（实车验证过的）：
- *   - SdlProxyBuilder（不是 SdlManager）
- *   - MultiplexTransportConfig（车机才能发现）
+ * <b>迁移分支（migration/sdl5-min）</b>：从 sdl_android 4.12.2 升到 5.8.0。
+ * 5.x 已经把 proxy 层（SdlProxyALM / SdlProxyBuilder / IProxyListenerALM）整体移除，
+ * 所以连接入口换成 {@link SdlManager} + {@link SdlManagerListener}；
+ * RPC 回调改成按 FunctionID 注册的 OnRPCNotificationListener。
  *
- * 新增：
- *   - StateRenderer 四状态渲染
- *   - LyricManager 歌词
- *   - 标题固定「西改改的Sync」
+ * **屏幕渲染（Show）仍然全部由 StateRenderer 手搓**，没有交给 ScreenManager：
+ * 这台车的显示规则（一行 14 半角、mediaTrack 单值共用、ETA 借 mm:ss 位…）
+ * 都是实车倒推出来的，需要字节级控制权和「看到发出去的原始载荷」的能力。
  */
-public class SdlService extends Service implements IProxyListenerALM,
-        NotificationCatcher.MusicListener {
+public class SdlService extends Service implements NotificationCatcher.MusicListener {
 
     private static final String TAG = "SYNC";
     private static final String CHANNEL_ID = "syncglance";
     private static final int NOTIF_ID = 1;
 
     /**
-     * 车机上显示的应用名。
+     * 车机上显示的应用名 —— 也是车机策略表里认应用的<b>唯一标识</b>。
      *
-     * 2026-11-20 定案：<b>车机上全部叫 SyncPlay</b>。
+     * ★ 迁移测试版故意改成 <b>SyncPlay5</b>：
+     *   正式版仍叫 SyncPlay，两个版本要能同时装、同时被车机发现，
+     *   同名会撞 DUPLICATE_NAME，后注册的那个会被拒。
+     *   这样一来车机「移动应用」列表里会同时出现 SyncPlay 和 SyncPlay5，方便 A/B 对比。
      *
-     * 原本想「菜单里用西改改的Sync、标题栏用 SyncPlay」，但实测做不到 ——
-     * 标题栏吃的是 appName 而不是 shortAppName（见 §8.20），
-     * shortAppName 只影响「离开 X」这类按钮。两个字段分开设置只会让
-     * 标题栏继续显示被截断的「西改改的...」，所以干脆统一。
-     *
-     * 手机桌面的图标名是 AndroidManifest 里的 android:label，与这里无关，
-     * 仍然是「西改改的Sync」。
+     * 手机桌面的图标名由 AndroidManifest 的 android:label 控制（西改改的Sync5），与这里无关。
      */
-    public static final String APP_NAME = "SyncPlay";
+    public static final String APP_NAME = "SyncPlay5";
 
     /** 与 APP_NAME 一致；保留这个常量是因为 Builder 仍要显式传一次 */
-    public static final String SHORT_APP_NAME = "SyncPlay";
+    public static final String SHORT_APP_NAME = "SyncPlay5";
 
-    /** 10 位数字 appID（原 SHAID 格式），避开 "123" 以免与其他调试 app 冲突 */
-    public static final String APP_ID = "1397139052";
+    /**
+     * 10 位数字 appID（原 SHAID 格式）。
+     *
+     * ★ 必须和正式版（1397139052）不同：
+     *   MultiplexTransportConfig 拿它给广播通道去重，
+     *   两个 SDL 应用用同一个值会互相抢通道。
+     */
+    public static final String APP_ID = "1397139053";
 
     private static SdlService instance;
-    private SdlProxyALM proxy;
+    /** 5.x 的连接入口（4.x 的 SdlProxyALM 已被上游移除） */
+    private volatile SdlManager sdlManager;
+    /** 我们自己主动 dispose 时为 true，避免 onDestroy 回调里重复收尾 */
+    private volatile boolean disposing = false;
+    /** 连接代际：每次 startProxy 自增，用来忽略旧连接对象迟到的回调 */
+    private volatile long generation = 0;
     private int corrId = 1;
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -81,7 +91,7 @@ public class SdlService extends Service implements IProxyListenerALM,
     private boolean menusBuilt = false;
 
     public static SdlService getInstance() { return instance; }
-    public SdlProxyALM getProxy() { return proxy; }
+    public SdlManager getProxy() { return sdlManager; }
     public SyncLifecycle getLifecycle() { return lifecycle; }
     public StateRenderer getRenderer() { return renderer; }
 
@@ -196,21 +206,22 @@ public class SdlService extends Service implements IProxyListenerALM,
             resetProxy();
         } else if (needRebuild()) {
             /*
-             * ★ 不能只看 proxy == null。
+             * ★ 不能只看连接对象 == null。
              *
-             *   onProxyClosed 之后 proxy 对象仍然存在（只是失效），
-             *   而 SDK 在 TRANSPORT_DISCONNECT 之后自己不会重建 SPP 连接。
-             *   如果只判断 null，就会出现：蓝牙断开 → 用户手动开 App
-             *   → proxy 非 null → 跳过重建 → 监听永远死着，界面卡在「未连接」。
-             *
-             *   所以只要 lifecycle 是 DISCONNECTED（说明 proxy 已经 closed），
-             *   就要重新来一遍。
+             *   连接断开后 SdlManager 会自己 dispose 并在 onDestroy() 里把它置空，
+             *   但如果连接只是失效、对象还在，SDK 也不会自动重建 SPP 连接。
+             *   所以只要 lifecycle 回到 DISCONNECTED，就要重新来一遍，
+             *   否则会出现「蓝牙断开 → 用户手动开 App → 跳过重建 → 监听永远死着」。
              */
-            Log2.i(TAG, "启动时发现连接不可用（proxy=" + (proxy == null ? "null" : "已关闭")
-                    + "），重建 proxy");
-            resetProxy();
+            Log2.i(TAG, "启动时发现连接不可用（SdlManager=" + (sdlManager == null ? "null" : "已失效")
+                    + "），重建连接");
+            if (sdlManager == null) {
+                startProxy();          // 还没建过，直接建（不用走 reset 的销毁流程）
+            } else {
+                resetProxy();
+            }
         } else {
-            Log2.i(TAG, "启动时 proxy 仍有效（" + lifecycle.describe() + "），复用");
+            Log2.i(TAG, "启动时连接仍有效（" + lifecycle.describe() + "），复用");
         }
 
         // ★ 官方推荐的补连接动作（每个进程生命周期只做一次）。
@@ -233,10 +244,10 @@ public class SdlService extends Service implements IProxyListenerALM,
     /** 每个进程生命周期只探测一次，避免每次 startService 都触发 ServiceFinder */
     private boolean pokedConnectedService = false;
 
-    /** 是否需要重建 proxy */
+    /** 是否需要重建连接 */
     private boolean needRebuild() {
-        if (proxy == null) return true;
-        // proxy 对象在，但连接已断 —— 必须重建
+        if (sdlManager == null) return true;
+        // 连接对象在，但连接已断 —— 必须重建
         return lifecycle.getState() == SyncLifecycle.State.DISCONNECTED;
     }
 
@@ -247,9 +258,12 @@ public class SdlService extends Service implements IProxyListenerALM,
     public void onDestroy() {
         Log2.i(TAG, "服务销毁");
         NotificationCatcher.setMusicListener(null);
-        if (proxy != null) {
-            try { proxy.dispose(); } catch (Exception ignored) { }
-            proxy = null;
+        disposing = true;
+        main.removeCallbacks(retryConnect);
+        SdlManager old = sdlManager;
+        sdlManager = null;
+        if (old != null) {
+            try { old.dispose(); } catch (Exception ignored) { }
         }
         instance = null;
         super.onDestroy();
@@ -374,95 +388,106 @@ public class SdlService extends Service implements IProxyListenerALM,
     // ---------------- 连接 ----------------
 
     public void startProxy() {
-        if (proxy != null) return;
+        if (sdlManager != null) return;
         try {
-            SdlProxyBuilder.Builder builder = new SdlProxyBuilder.Builder(
-                    this, APP_ID, APP_NAME, true, this);
+            /*
+             * ★ 5.x 的建连入口：SdlManager。
+             *
+             *   与 4.12.2 的差异（逐条对应，别漏）：
+             *     1. isMediaApplication 没有直接 setter —— 只能靠 setAppTypes([MEDIA]) 推导。
+             *        漏了它 → isMediaApplication=false → 车机很可能不再给 mediaTrack 和第 3/4 行，
+             *        整个双屏布局会崩。这是本次迁移最容易踩的坑。
+             *     2. autoActivateID 在新版 SDK 里<b>没有等价 API</b>（只剩 setResumeHash，
+             *        那是 RPC 会话恢复，需要车机支持 resumption，SYNC 1.1 大概率不支持）。
+             *        所以这个能力在迁移版里是缺失的，属于已知取舍。
+             *     3. 语言：新版 Builder 在 build() 时若 hmiLanguage 为 null 会强制设成 EN_US。
+             *        实测这台车机是 ZH-CN，所以这里显式写死 ZH_CN（按用户要求）。
+             *     4. build() 之后要调 start()，是异步的；onStart() 才是"注册完成"。
+             */
+            final long gen = ++generation;      // 本次连接的代际，旧 connection 的回调会被它过滤掉
 
-            // ★ 关键：没有这个车机搜不到
-            builder.setTransportType(
-                    new MultiplexTransportConfig(getApplicationContext(), APP_ID));
+            Vector<AppHMIType> appTypes = new Vector<>();
+            appTypes.add(AppHMIType.MEDIA);
 
-            // ★ 实测（2026-11-20 照片）：车机标题栏用的是 appName，不是这个短名。
-            //   截图里标题栏显示「西改改的...」（被截断到约 5 个汉字宽），
-            //   而底部的「离开 SyncPlay」按钮才用到 shortAppName。
-            //   也就是说 shortAppName 只影响对话框/按钮这类窄处，
-            //   改它<b>不会</b>让标题栏变成 SyncPlay。
+            java.util.Map<FunctionID, OnRPCNotificationListener> listeners = new java.util.HashMap<>();
+            listeners.put(FunctionID.ON_HMI_STATUS, notified(n -> onHmiStatus((OnHMIStatus) n)));
+            listeners.put(FunctionID.ON_COMMAND, notified(n -> onCommand((OnCommand) n)));
+            listeners.put(FunctionID.ON_BUTTON_PRESS, notified(n -> onButtonPress((OnButtonPress) n)));
+            listeners.put(FunctionID.ON_BUTTON_EVENT, notified(n -> onButtonEvent((OnButtonEvent) n)));
+            listeners.put(FunctionID.ON_DRIVER_DISTRACTION, notified(n -> onDriverDistraction((OnDriverDistraction) n)));
+            listeners.put(FunctionID.ON_PERMISSIONS_CHANGE, notified(n -> onPermissionsChange((OnPermissionsChange) n)));
+
+            SdlManager.Builder builder = new SdlManager.Builder(
+                    this, APP_ID, APP_NAME, newManagerListener(gen));
+            // 关键：没有这个车机搜不到（MultiplexTransportConfig）
+            builder.setTransportType(new MultiplexTransportConfig(getApplicationContext(), APP_ID));
             builder.setShortAppName(SHORT_APP_NAME);
+            builder.setAppTypes(appTypes);                       // → isMediaApplication = true
+            builder.setLanguage(Language.ZH_CN);                  // 硬写中文
+            builder.setRPCNotificationListeners(listeners);       // 注册前预挂，避免漏掉早期通知
 
-            // ★ autoActivateID：持久化并在每次重连时回传。
-            //
-            //   官方说明它能「重新获取 HMILevel = FULL」，且没有有效期限制。
-            //   作用是：App 进程被系统杀掉、或车机重新扫描应用时，
-            //   车机能凭这个 ID 直接把我们的 App 重新激活成全屏，
-            //   而不是要求用户再去菜单里手动点一次。
-            builder.setAutoActivateID(loadOrCreateAutoActivateId());
-
-            // ★ 语言不指定（传 null）：跟随车机当前语言。
-            //
-            //   之前硬编码 ZH_CN，虽然本车实测就是 ZH-CN 能对上，
-            //   但硬编码会在车机语言被切换时直接注册失败（WRONG_LANGUAGE）。
-            //   Ford 自家 Sync Destinations 也是留空。
-            //   不调用 setLangDesired / setHMILangDesired 即为 null。
-
-            proxy = builder.build();
+            sdlManager = builder.build();
             lifecycle.onProxyCreated();
-            renderer.setProxy(proxy);
+            // 屏幕渲染仍然走我们自己的发送管道（保住"看到真正发出去的载荷"这个调试能力）
+            renderer.setSender(msg -> sendRpc((RPCRequest) msg));
+            sdlManager.start();
             updateNotification();
-            Log2.i(TAG, "✓ proxy 建立，等待车机选中（文档 3.3.1.1：此时还不能发 RPC）");
-        } catch (SdlException e) {
-            Log2.e(TAG, "创建 proxy 失败", e);
+            Log2.i(TAG, "✓ SdlManager 已启动，等待车机连上并完成注册"
+                    + "（appName=" + APP_NAME + ", appId=" + APP_ID + "）");
+        } catch (Exception e) {
+            Log2.e(TAG, "创建 SdlManager 失败", e);
+            sdlManager = null;
             lifecycle.onProxyClosed();
         }
     }
 
-    // ---------------- autoActivateID ----------------
-
-    private static final String PREF_SDL = "sdl";
-    private static final String KEY_AUTO_ACTIVATE_ID = "auto_activate_id";
-
     /**
-     * 取出（或首次生成）autoActivateID。
-     *
-     * 这个值必须<b>永久稳定</b>：一旦变了，车机就认不出是同一个 App 实例，
-     * 自动激活会失效。所以只在第一次生成，之后一直复用，
-     * 卸载重装才会产生新的（这也符合预期）。
+     * 小工具：5.x 的 {@link OnRPCNotificationListener} 是抽象类不是接口，
+     * 不能直接写 lambda，这里包一层。参数用 Consumer 只是为了让调用处保持简洁。
      */
-    private String loadOrCreateAutoActivateId() {
-        try {
-            android.content.SharedPreferences sp =
-                    getSharedPreferences(PREF_SDL, MODE_PRIVATE);
-            String id = sp.getString(KEY_AUTO_ACTIVATE_ID, null);
-            if (id != null && !id.isEmpty()) {
-                Log2.i(TAG, "复用 autoActivateID = " + id);
-                return id;
+    private static OnRPCNotificationListener notified(
+            java.util.function.Consumer<RPCNotification> handler) {
+        return new OnRPCNotificationListener() {
+            @Override
+            public void onNotified(RPCNotification notification) {
+                handler.accept(notification);
             }
-            // 32 位无横线 UUID，避免某些实现按长度截断
-            id = java.util.UUID.randomUUID().toString().replace("-", "");
-            sp.edit().putString(KEY_AUTO_ACTIVATE_ID, id).apply();
-            Log2.i(TAG, "★ 首次生成 autoActivateID = " + id);
-            return id;
-        } catch (Exception e) {
-            Log2.w(TAG, "读写 autoActivateID 失败: " + e.getMessage());
-            return null;      // 拿不到就不传，退化为旧行为
-        }
+        };
     }
+
+    // ---------------- 关于 autoActivateID（迁移版缺失项）----------------
+
+    /*
+     * 4.12.2 时我们持久化并回传 autoActivateID，让车机能凭它把 App 直接重新激活到
+     * HMILevel=FULL（不用用户再去车机菜单里点一次）。
+     *
+     * 5.8.0 的 SdlManager.Builder 里<b>没有</b>对应 API —— 只有 setResumeHash，
+     * 而那是 RPC 会话恢复（resumption）机制，需要车机支持 SDL 4.0+ 的 resumption，
+     * SYNC 1.1（SDL 2.1）基本不可能支持。
+     *
+     * 所以迁移版暂时放弃这个能力；如果上车验证发现"杀掉 App 后车机不再自动激活"
+     * 影响使用，得考虑退回 4.12.2 或自定义 RAI。
+     */
 
     /**
      * 重置连接。
-     * 文档 3.3.1.2 的 resetProxy：断开 → 释放资源 → 重新初始化，
-     * 完成后可以接受新的 SYNC 连接。
+     * 断开 → 释放资源 → 重新初始化，完成后可以接受新的 SYNC 连接。
      */
     public void resetProxy() {
         Log2.i(TAG, "重置连接");
-        if (proxy != null) {
-            try { proxy.dispose(); } catch (Exception ignored) { }
-            proxy = null;
+        disposing = true;                 // 告诉 onDestroy()：这是我们主动拆的，别重复收尾
+        resetConnectRetries();
+        connectRetries = 0;
+        SdlManager old = sdlManager;
+        sdlManager = null;
+        renderer.setSender(null);
+        if (old != null) {
+            try { old.dispose(); } catch (Exception ignored) { }
         }
         lifecycle.onProxyClosed();
         menusBuilt = false;
-        renderer.setProxy(null);
         renderer.onDisconnected();
+        disposing = false;
         startProxy();
     }
 
@@ -491,7 +516,7 @@ public class SdlService extends Service implements IProxyListenerALM,
      * 非 FULL 时直接丢弃并记日志，避免抛 SdlException 刷屏。
      */
     public void sendRpc(RPCRequest req) {
-        if (proxy == null) {
+        if (sdlManager == null) {
             Log2.w(TAG, "✗ 未连接，丢弃 " + req.getFunctionName());
             return;
         }
@@ -501,10 +526,27 @@ public class SdlService extends Service implements IProxyListenerALM,
             return;
         }
         try {
-            proxy.sendRPCRequest(req);
+            /*
+             * ★ 5.x 没有全局的"响应回调"了（4.x 是一个巨长的 IProxyListenerALM 接口）。
+             *   为了保住原来的日志能力（看到每条 RPC 的结果码），
+             *   这里给每条请求挂一个通用 OnRPCResponseListener，
+             *   等价于 4.x 里的 onShowResponse / onSetMediaClockTimerResponse …
+             */
+            req.setOnRPCResponseListener(new OnRPCResponseListener() {
+                @Override
+                public void onResponse(int correlationId, RPCResponse response) {
+                    if (response == null) return;
+                    Log2.rawMsg("←", response);
+                    if (!response.getSuccess()) {
+                        Log2.w(TAG, response.getFunctionName() + " ← " + response.getResultCode()
+                                + (response.getInfo() == null ? "" : " " + response.getInfo()));
+                    }
+                }
+            });
+            sdlManager.sendRPC(req);
             Log2.i(TAG, "→ " + req.getFunctionName() + " #" + req.getCorrelationID());
             logRawJson("→", req);
-        } catch (SdlException e) {
+        } catch (Exception e) {
             Log2.e(TAG, "发送失败: " + req.getFunctionName(), e);
         }
     }
@@ -740,9 +782,9 @@ public class SdlService extends Service implements IProxyListenerALM,
     /** 车机声明支持的按键集合；读不到就返回空集（表示不做过滤） */
     private java.util.Set<ButtonName> supportedButtons() {
         java.util.Set<ButtonName> out = new java.util.HashSet<>();
-        if (proxy == null) return out;
+        if (sdlManager == null) return out;
         try {
-            RegisterAppInterfaceResponse rai = proxy.getRegisterAppInterfaceResponse();
+            RegisterAppInterfaceResponse rai = sdlManager.getRegisterAppInterfaceResponse();
             if (rai == null) return out;
             java.util.List<ButtonCapabilities> caps = rai.getButtonCapabilities();
             if (caps == null) return out;
@@ -858,16 +900,15 @@ public class SdlService extends Service implements IProxyListenerALM,
     /**
      * HMI 状态变化 —— 整个连接生命周期的中心。
      *
-     * 文档 3.3.1 的流程：
-     *   NONE(firstRun=true) → BACKGROUND → LIMITED → FULL
+     * 5.x 里这个通知通过 {@code FunctionID.ON_HMI_STATUS} 注册（见 startProxy），
+     * 不再是 4.x 那个 {@code onOnHMIStatus} 接口方法。
      *
      * 规则：
      *   - 只有 FULL 能发 RPC
      *   - 首次进入 FULL 要做完整初始化（建菜单、订阅按键）
      *   - 从 FULL 掉出去时，车机会自动终止我们正在进行的操作
      */
-    @Override
-    public void onOnHMIStatus(OnHMIStatus n) {
+    public void onHmiStatus(OnHMIStatus n) {
         Log2.rawMsg("←", n);
         SyncLifecycle.State prev = lifecycle.onHmiStatus(
                 n.getHmiLevel(), n.getFirstRun(),
@@ -889,6 +930,7 @@ public class SdlService extends Service implements IProxyListenerALM,
 
         if (lifecycle.justBecameFull(prev)) {
             Log2.i(TAG, "★ 进入 FULL —— 开始初始化");
+            resetConnectRetries();          // 连上了，重试计数清零
             initializeForConnection();
         } else if (lifecycle.justLostFocus(prev)) {
             // 文档 3.4.4.4：FULL/LIMITED 期间发起的操作会被车机自动终止
@@ -909,9 +951,9 @@ public class SdlService extends Service implements IProxyListenerALM,
      * 分析屏幕行为时这是最权威的依据。
      */
     private void dumpRaiResponse() {
-        if (proxy == null) return;
+        if (sdlManager == null) return;
         try {
-            RegisterAppInterfaceResponse rai = proxy.getRegisterAppInterfaceResponse();
+            RegisterAppInterfaceResponse rai = sdlManager.getRegisterAppInterfaceResponse();
             if (rai == null) {
                 Log2.w(TAG, "RegisterAppInterfaceResponse 为空");
                 return;
@@ -972,7 +1014,6 @@ public class SdlService extends Service implements IProxyListenerALM,
             // 版本信息 —— 能确认固件代际
             sb.append("SDL版本: ").append(rai.getSdlVersion()).append('\n');
             sb.append("系统软件版本: ").append(rai.getSystemSoftwareVersion()).append('\n');
-            sb.append("Proxy版本: ").append(rai.getProxyVersionInfo()).append('\n');
 
             // 软键能力（预期为空，但值得确认）
             java.util.List<SoftButtonCapabilities> sbc = rai.getSoftButtonCapabilities();
@@ -1058,67 +1099,18 @@ public class SdlService extends Service implements IProxyListenerALM,
     /** 回 FULL 时需要补发计时器（失焦时车机会停掉它） */
     private boolean pendingTimerResend = false;
 
-    @Override
-    public void onProxyClosed(String info, Exception e, SdlDisconnectedReason reason) {
-        SyncLifecycle.State prev = lifecycle.getState();
-        Log2.i(TAG, "onProxyClosed: " + reason + " " + info + "（原状态 " + prev + "）");
 
-        lifecycle.onProxyClosed();
-        updateNotification();
-        // 断开了，导航数据不用解码了（省 CPU）
-        com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(false);
-        // 文档 3.4.2.2：车机侧所有菜单/订阅都已被删除，重连要全量重建
-        menusBuilt = false;
-        pendingTimerResend = true;
-        renderer.onDisconnected();
-        renderer.setProxy(null);
+    // ---------------- 通知回调（5.x 按 FunctionID 注册，替代 4.x 的巨型监听接口）----------------
 
-        // 文档 3.3.1.2：判断是"可重连的断开"还是"需要重建的不可恢复错误"
-        if (reason != null) {
-            switch (reason) {
-                case USER_EXIT:
-                case IGNITION_OFF:
-                case BLUETOOTH_OFF:
-                case TRANSPORT_DISCONNECT:
-                case TRANSPORT_ERROR:
-                case HB_TIMEOUT:
-                    Log2.i(TAG, "可恢复断开（" + reason + "），proxy 会继续监听重连");
-                    break;
-                case APPLICATION_REQUESTED_DISCONNECT:
-                    Log2.i(TAG, "应用主动断开");
-                    break;
-                case RPC_SESSION_ENDED:
-                case REQUEST_WHILE_IN_NONE_HMI_LEVEL:
-                    Log2.w(TAG, "会话结束（" + reason + "），下次 FULL 需要重建");
-                    break;
-                default:
-                    Log2.w(TAG, "断开原因 " + reason + "，按可重连处理");
-                    break;
-            }
-        }
-    }
-
-    @Override
-    public void onError(String info, Exception e) {
-        Log2.e(TAG, "onError: " + info, e);
-    }
-
-    @Override
-    public void onGenericResponse(GenericResponse r) {
-        Log2.rawMsg("←", r);
-        Log2.w(TAG, "GenericResponse（车机不支持该 RPC）: " + r.getResultCode()
-                + (r.getInfo() == null ? "" : " " + r.getInfo()));
-    }
-
-    @Override
-    public void onOnCommand(OnCommand n) {
+    /** 菜单项被点（不走 OnButtonPress） */
+    private void onCommand(OnCommand n) {
         Log2.rawMsg("←", n);
         Log2.i(TAG, "OnCommand cmdID=" + n.getCmdID());
         CommandRouter.handle(this, n.getCmdID());
     }
 
-    @Override
-    public void onOnButtonPress(OnButtonPress n) {
+    /** 物理键 + 软键回调 */
+    private void onButtonPress(OnButtonPress n) {
         Log2.rawMsg("←", n);
         Log2.i(TAG, "OnButtonPress " + n.getButtonName() + " " + n.getButtonPressMode()
                 + (n.getCustomButtonID() == null ? "" : " id=" + n.getCustomButtonID()));
@@ -1131,152 +1123,138 @@ public class SdlService extends Service implements IProxyListenerALM,
         CommandRouter.handleButton(this, n.getButtonName(), n.getButtonPressMode());
     }
 
-    @Override
-    public void onOnButtonEvent(OnButtonEvent n) {
+    private void onButtonEvent(OnButtonEvent n) {
         Log2.rawMsg("←", n);
         Log2.i(TAG, "OnButtonEvent " + n.getButtonName() + " " + n.getButtonEventMode()
                 + (n.getCustomButtonID() == null ? "" : " id=" + n.getCustomButtonID()));
     }
 
-    @Override
-    public void onOnDriverDistraction(OnDriverDistraction n) {
+    private void onDriverDistraction(OnDriverDistraction n) {
         Log2.rawMsg("←", n);
         Log2.i(TAG, "OnDriverDistraction " + n.getState());
     }
 
-    @Override
-    public void onOnLockScreenNotification(OnLockScreenStatus n) {
-        Log2.rawMsg("←", n);
-        try { Log2.i(TAG, "OnLockScreen " + n.getHMILevel()); } catch (Exception ignored) { }
-    }
-
-    @Override
-    public void onOnPermissionsChange(OnPermissionsChange n) {
+    private void onPermissionsChange(OnPermissionsChange n) {
         Log2.rawMsg("←", n);
         Log2.i(TAG, "OnPermissionsChange");
     }
 
-    // --- 响应回调（全部记原始 JSON）---
+    // ---------------- SdlManagerListener（5.x 的连接生命周期）----------------
 
-    @Override
-    public void onShowResponse(ShowResponse r) {
-        Log2.rawMsg("←", r);
-        if (r.getResultCode() != Result.SUCCESS) {
-            Log2.w(TAG, "Show ← " + r.getResultCode()
-                    + (r.getInfo() == null ? "" : " " + r.getInfo()));
+    /**
+     * 5.x 要求把连接回调挂到一个 {@link SdlManagerListener} 上。
+     *
+     * ★ 必须用内部类，<b>不能</b>让 SdlService 直接 implement 这个接口：
+     *   它的回调叫 {@code onDestroy()}，和 Service 自己的 {@code onDestroy()}
+     *   同名同签名 —— 一个类里只有一个方法，两套语义会打架
+     *   （连接一断开就误跑 Service 的销毁逻辑，把 instance 置空，UI 就找不到服务了）。
+     *
+     * ★ 每次 startProxy() 都新建一个，并带上「代际」：
+     *   dispose() 是异步的，旧 manager 的 onDestroy 可能在新 manager 建好之后才到，
+     *   届时如果照单全收，会把刚建好的连接和 sender 一起清掉。
+     *   所以回调里先比对代际，过期的直接忽略。
+     */
+    private SdlManagerListener newManagerListener(final long gen) {
+        return new SdlManagerListener() {
+            @Override
+            public void onStart() {
+                if (gen != generation) return;
+                Log2.i(TAG, "✓ SdlManager onStart —— 已注册完成，等待车机下发 HMI 状态");
+            }
+
+            @Override
+            public void onDestroy() {
+                if (gen != generation) {
+                    Log2.i(TAG, "忽略过期连接对象的 onDestroy（代际 " + gen
+                            + " ≠ 当前 " + generation + "）");
+                    return;
+                }
+                if (disposing) return;      // 我们自己 dispose 的，收尾已在调用处做过
+                handleConnectionClosed();
+            }
+
+            @Override
+            public void onError(String info, Exception e) {
+                Log2.e(TAG, "onError: " + info, e);
+            }
+
+            @Override
+            public boolean onSystemInfoReceived(SystemInfo systemInfo) {
+                return true;                // 不做系统信息拦截
+            }
+
+            /**
+             * 车机回报的语言与请求不符时，5.x 会问我们要不要改注册信息。
+             * 我们硬写 ZH_CN（本车实测就是 ZH-CN），返回 null 表示"不改"，
+             * 让 SDK 走它自己的 ChangeRegistration 流程。
+             */
+            @Override
+            public LifecycleConfigurationUpdate managerShouldUpdateLifecycle(Language language, Language hmiLanguage) {
+                Log2.w(TAG, "车机语言与请求不符：language=" + language + " hmi=" + hmiLanguage);
+                return null;
+            }
+        };
+    }
+
+    /**
+     * 连接结束时的本地收尾（等价于 4.x 的 onProxyClosed）。
+     * 连接对象由 SDK 自己销毁，这里只清我们的状态，让重连能重建。
+     */
+    private void handleConnectionClosed() {
+        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "）");
+        sdlManager = null;
+        lifecycle.onProxyClosed();
+        updateNotification();
+        // 断开了，导航数据不用解码了（省 CPU）
+        com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(false);
+        // 车机侧所有菜单/订阅都已被删除，重连要全量重建
+        menusBuilt = false;
+        pendingTimerResend = true;
+        renderer.onDisconnected();
+        renderer.setSender(null);
+        scheduleRetryConnect();
+    }
+
+    // ---------------- 连接重试 ----------------
+
+    /**
+     * 5.x 与 4.x 的一个行为差异：**连不上就直接自毁**。
+     *
+     * 4.12.2 的 SdlProxy 建好后会一直挂着等车机；而 5.8.0 的 SdlManager
+     * 在拿不到可用传输（RouterService 还没起来 / 车机还没连）时会立刻 dispose。
+     * 实测本机（没连车机）启动后约 30ms 就收到 onDestroy。
+     *
+     * 这在车上会造成时序竞争：ACL_CONNECTED 把我们的 Service 拉起来时，
+     * RouterService 可能还没就绪 → manager 自毁 → 之后只能等 onSdlEnabled 再拉一次。
+     * 为了不把成败押在那个时序上，这里做一个有上限的退避重试：
+     * 只要还没进过 FULL，就每 5 秒重建一次，最多 12 次（约 1 分钟），
+     * 超过就停手，避免无限循环刷日志/耗电。
+     */
+    private static final int MAX_CONNECT_RETRIES = 12;
+    private static final long RETRY_CONNECT_MS = 5000;
+    private int connectRetries = 0;
+
+    private final Runnable retryConnect = () -> {
+        if (sdlManager != null) return;                       // 已经连上了
+        if (lifecycle.canSendRpc()) return;                    // 已经是 FULL
+        if (connectRetries >= MAX_CONNECT_RETRIES) {
+            Log2.w(TAG, "连接重试已达上限 " + MAX_CONNECT_RETRIES + " 次，停止（等蓝牙事件再拉）");
+            return;
         }
+        connectRetries++;
+        Log2.i(TAG, "重建连接（第 " + connectRetries + "/" + MAX_CONNECT_RETRIES + " 次重试）");
+        startProxy();
+    };
+
+    private void scheduleRetryConnect() {
+        if (connectRetries >= MAX_CONNECT_RETRIES) return;
+        main.removeCallbacks(retryConnect);
+        main.postDelayed(retryConnect, RETRY_CONNECT_MS);
     }
 
-    @Override
-    public void onSetMediaClockTimerResponse(SetMediaClockTimerResponse r) {
-        Log2.rawMsg("←", r);
-        Log2.i(TAG, "SetMediaClockTimer ← " + r.getResultCode());
+    /** 连上之后把重试计数清零，下次断开重新给足机会 */
+    private void resetConnectRetries() {
+        connectRetries = 0;
+        main.removeCallbacks(retryConnect);
     }
-
-    @Override
-    public void onChangeRegistrationResponse(ChangeRegistrationResponse r) {
-        Log2.rawMsg("←", r);
-        Log2.i(TAG, "ChangeRegistration ← " + r.getResultCode());
-    }
-
-    @Override
-    public void onAddCommandResponse(AddCommandResponse r) {
-        Log2.rawMsg("←", r);
-        Log2.i(TAG, "AddCommand ← " + r.getResultCode());
-    }
-
-    @Override
-    public void onAddSubMenuResponse(AddSubMenuResponse r) {
-        Log2.rawMsg("←", r);
-        Log2.i(TAG, "AddSubMenu ← " + r.getResultCode());
-    }
-
-    @Override
-    public void onSubscribeButtonResponse(SubscribeButtonResponse r) {
-        Log2.rawMsg("←", r);
-        Log2.i(TAG, "SubscribeButton ← " + r.getResultCode()
-                + (r.getInfo() == null ? "" : " " + r.getInfo()));
-    }
-
-    @Override
-    public void onSpeakResponse(SpeakResponse r) {
-        Log2.rawMsg("←", r);
-        Log2.i(TAG, "Speak ← " + r.getResultCode());
-    }
-
-    @Override public void onServiceEnded(OnServiceEnded o) { Log2.i(TAG, "onServiceEnded"); }
-    @Override public void onServiceNACKed(OnServiceNACKed o) { Log2.i(TAG, "onServiceNACKed"); }
-    @Override public void onOnStreamRPC(OnStreamRPC o) { Log2.rawMsg("←", o.toString()); }
-    @Override public void onStreamRPCResponse(StreamRPCResponse o) { Log2.rawMsg("←", o); }
-    @Override public void onServiceDataACK(int i) { }
-
-    // --- 其余空实现（4.12.2 接口要求）---
-
-    @Override public void onScrollableMessageResponse(ScrollableMessageResponse r) { }
-    @Override public void onAlertResponse(AlertResponse r) { }
-    @Override public void onDeleteCommandResponse(DeleteCommandResponse r) { }
-    @Override public void onDeleteSubMenuResponse(DeleteSubMenuResponse r) { }
-    @Override public void onCreateInteractionChoiceSetResponse(CreateInteractionChoiceSetResponse r) { }
-    @Override public void onDeleteInteractionChoiceSetResponse(DeleteInteractionChoiceSetResponse r) { }
-    @Override public void onPerformInteractionResponse(PerformInteractionResponse r) { }
-    @Override public void onUnsubscribeButtonResponse(UnsubscribeButtonResponse r) { }
-    @Override public void onUnsubscribeVehicleDataResponse(UnsubscribeVehicleDataResponse r) { }
-    @Override public void onGetVehicleDataResponse(GetVehicleDataResponse r) { }
-    @Override public void onSetGlobalPropertiesResponse(SetGlobalPropertiesResponse r) { }
-    @Override public void onResetGlobalPropertiesResponse(ResetGlobalPropertiesResponse r) { }
-    @Override public void onOnTBTClientState(OnTBTClientState o) { }
-    @Override public void onSubscribeVehicleDataResponse(SubscribeVehicleDataResponse r) { }
-    @Override public void onOnVehicleData(OnVehicleData o) { }
-    @Override public void onPutFileResponse(PutFileResponse r) { }
-    @Override public void onDeleteFileResponse(DeleteFileResponse r) { }
-    @Override public void onListFilesResponse(ListFilesResponse r) { }
-    @Override public void onSetAppIconResponse(SetAppIconResponse r) { }
-    @Override public void onSetDisplayLayoutResponse(SetDisplayLayoutResponse r) { }
-    @Override public void onOnLanguageChange(OnLanguageChange o) { }
-    @Override public void onOnSystemRequest(OnSystemRequest o) { }
-    @Override public void onSystemRequestResponse(SystemRequestResponse r) { }
-    @Override public void onOnKeyboardInput(OnKeyboardInput o) { }
-    @Override public void onOnTouchEvent(OnTouchEvent o) { }
-    @Override public void onDialNumberResponse(DialNumberResponse r) { }
-    @Override public void onSendLocationResponse(SendLocationResponse r) { }
-    @Override public void onShowConstantTbtResponse(ShowConstantTbtResponse r) { }
-    @Override public void onAlertManeuverResponse(AlertManeuverResponse r) { }
-    @Override public void onUpdateTurnListResponse(UpdateTurnListResponse r) { }
-    @Override public void onGetWayPointsResponse(GetWayPointsResponse r) { }
-    @Override public void onSubscribeWayPointsResponse(SubscribeWayPointsResponse r) { }
-    @Override public void onUnsubscribeWayPointsResponse(UnsubscribeWayPointsResponse r) { }
-    @Override public void onReadDIDResponse(ReadDIDResponse r) { }
-    @Override public void onGetDTCsResponse(GetDTCsResponse r) { }
-    @Override public void onDiagnosticMessageResponse(DiagnosticMessageResponse r) { }
-    @Override public void onOnAudioPassThru(OnAudioPassThru o) { }
-    @Override public void onPerformAudioPassThruResponse(PerformAudioPassThruResponse r) { }
-    @Override public void onEndAudioPassThruResponse(EndAudioPassThruResponse r) { }
-    @Override public void onShowAppMenuResponse(ShowAppMenuResponse r) { }
-
-    // --- 其他 SDL 2.x 扩展，这台车机不会用到，但接口要求实现 ---
-    @Override public void onOnHashChange(OnHashChange o) { }
-    @Override public void onSliderResponse(SliderResponse r) { }
-    @Override public void onOnWayPointChange(OnWayPointChange o) { }
-    @Override public void onGetSystemCapabilityResponse(GetSystemCapabilityResponse r) { }
-    @Override public void onGetInteriorVehicleDataResponse(GetInteriorVehicleDataResponse r) { }
-    @Override public void onCreateWindowResponse(CreateWindowResponse r) { }
-    @Override public void onDeleteWindowResponse(DeleteWindowResponse r) { }
-    @Override public void onButtonPressResponse(ButtonPressResponse r) { }
-    @Override public void onSetInteriorVehicleDataResponse(SetInteriorVehicleDataResponse r) { }
-    @Override public void onOnInteriorVehicleData(OnInteriorVehicleData o) { }
-    @Override public void onSendHapticDataResponse(SendHapticDataResponse r) { }
-    @Override public void onOnRCStatus(OnRCStatus o) { }
-    @Override public void onSetCloudAppProperties(SetCloudAppPropertiesResponse r) { }
-    @Override public void onGetCloudAppProperties(GetCloudAppPropertiesResponse r) { }
-    @Override public void onPublishAppServiceResponse(PublishAppServiceResponse r) { }
-    @Override public void onGetAppServiceDataResponse(GetAppServiceDataResponse r) { }
-    @Override public void onGetFileResponse(GetFileResponse r) { }
-    @Override public void onPerformAppServiceInteractionResponse(PerformAppServiceInteractionResponse r) { }
-    @Override public void onOnAppServiceData(OnAppServiceData o) { }
-    @Override public void onGetInteriorVehicleDataConsentResponse(GetInteriorVehicleDataConsentResponse r) { }
-    @Override public void onReleaseInteriorVehicleDataModuleResponse(ReleaseInteriorVehicleDataModuleResponse r) { }
-    @Override public void onOnSystemCapabilityUpdated(OnSystemCapabilityUpdated o) { }
-    @Override public void onCloseApplicationResponse(CloseApplicationResponse r) { }
-    @Override public void onCancelInteractionResponse(CancelInteractionResponse r) { }
-    @Override public void onUnpublishAppServiceResponse(UnpublishAppServiceResponse r) { }
 }
