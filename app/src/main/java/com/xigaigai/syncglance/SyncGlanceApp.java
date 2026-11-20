@@ -47,15 +47,29 @@ public class SyncGlanceApp extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
-        SyncCore.get().init(this);
 
-        if (!isMainProcess()) return;      // Router 进程不补连接
+        /*
+         * ★ 日志能力两个进程都要（Router 进程也要打日志），
+         *   但数据采集层只要主进程要。
+         *
+         *   RouterService 跑在独立进程（com.smartdevicelink.router），
+         *   它如果也 init SyncCore，会连带做这些完全没用的事：
+         *     - 初始化 StateRenderer / LyricManager（主进程才需要）
+         *     - 绑定高德 NaviService（两个进程抢同一个绑定）
+         *     - 注册音乐通知监听回调
+         *   既浪费内存，也可能干扰主进程的数据采集。
+         */
+        Log2.init(this);
+
+        if (!isMainProcess()) return;
+
+        SyncCore.get().init(this);
 
         Log2.i(TAG, "应用启动，补一次「现在有没有已连接的车机」探测");
         if (SdlReceiver.pokeIfBluetoothConnected(this)) return;
 
         /*
-         * ★ 首次安装后的第一次启动会失败（实测：第二条启动就成功）。
+         * ★ 首次安装后的第一次启动会失败（实测：第二次启动就成功）。
          *
          *   Application.onCreate 跑得极早，此时蓝牙权限 / 库内部初始化可能还没就绪，
          *   queryForConnectedService 会抛异常（message 往往为空）。

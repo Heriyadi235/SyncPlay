@@ -664,6 +664,41 @@ Ford 自家 `Sync Destinations` 也是留空。
 > 新实例 → 标记重置，实际语义变成「每个实例一次」，和注释不符。现已挪到
 > Application 层。
 
+### 5.9 与官方 Integration Basics - Java 的逐条对照
+
+官方文档：[Integration Basics - Java](https://smartdevicelink.com/en/guides/android/getting-started/integration-basics-java/)
+
+| 官方要求 | 本项目 | 说明 |
+|---|---|---|
+| 用**前台服务**承载 SDL，不能用 Activity | ✅ `SdlService` | 官方原话：Android 10 限制后台启动 Activity |
+| Service 声明 `exported="true"`、`enabled="true"`、`foregroundServiceType="connectedDevice"` | ✅ 已补齐 | 原先 `exported="false"`；应用在后台时 Router 可能拉不起服务 |
+| `onCreate` 里建通知渠道 + `startForeground` | ✅ | 渠道 `syncglance`，`IMPORTANCE_LOW` |
+| **`onDestroy` 里 `stopForeground`，不要留通知** | ✅ 已补 | 官方原话："don't leave your notification in the notification tray" |
+| `onStartCommand` 里建 `SdlManager`，返回 `START_STICKY` | ✅（更细） | 官方判 `sdlManager == null`；我们按 `lifecycle` 状态判 `needRebuild()`，修过「蓝牙断开后手动开 App 监听死掉」 |
+| `MultiplexTransportConfig` 作为传输 | ✅ | 官方示例多传 `FLAG_MULTI_SECURITY_OFF`；我们用默认安全等级（实车能连，不擅自放宽） |
+| `setAppTypes([MEDIA])` | ✅ | 决定车机把它归到「媒体 / 音频」 |
+| `setShortAppName` | ✅ | 车机列表里用短名 |
+| `setAppIcon` | ⛔ 故意不做 | 本车 `graphicSupported=false`，图标用不了 |
+| `SdlManagerListener` 五个方法 | ✅ 全实现 | `onStart` / `onDestroy` / `onError` / `managerShouldUpdateLifecycle` / `onSystemInfoReceived` |
+| **`onSystemInfoReceived` 必须返回 `true`** | ✅ | 官方标了 "Must"：返回 false 会导致应用连不上（AS 自动生成的就是 false） |
+| listener 的 `onDestroy()` 里 `stopSelf()` | ✅ | 官方示例就是 `SdlService.this.stopSelf()` |
+| `SdlService.onDestroy()` 里 `sdlManager.dispose()` | ✅ | 官方标了 "Must" |
+| `SdlManager` 实例不可复用，断开后必须新建 | ✅ | 用「代际号」`generation` 忽略旧对象的迟到回调 |
+| `SdlReceiver extends SdlBroadcastReceiver`，`exported="true"`，监听 `ACL_CONNECTED` + `sdl.router.startservice` | ✅ | 缺 `sdl.router.startservice` 会让 `queryForConnectedService` 直接抛异常 |
+| `defineLocalSdlRouterClass()` 返回自己的 Router 子类 | ✅ `SyncRouterService` | |
+| **`onSdlEnabled` 启动服务要分版本** | ✅ 已补 | Android 12+ 用 `TransportConstants.PENDING_INTENT_EXTRA` 的 PendingIntent；O~R 用 `startForegroundService`；更低用 `startService` |
+
+**两处曾漏掉、2026-11-21 补齐的**：
+
+1. `SdlService` 的 `exported` 从 `false` 改 `true` —— 应用在后台时，
+   Router/系统从外部启动服务需要它可以被外部访问
+2. `onSdlEnabled` 补 PendingIntent 路径 —— 官方对 Android 12+ 的推荐做法，
+   绕开「后台启动前台服务」的限制
+
+> 我们额外做、官方 Integration Basics 里没有的：通知监听（`NotificationCatcher`）、
+> 高德 AmapLink 解密、`SyncCore` 把数据采集与连接层解耦。这些属于业务，不影响
+> SDL 生命周期主链路。
+
 ---
 
 ## 六、权限

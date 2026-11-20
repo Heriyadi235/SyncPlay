@@ -83,10 +83,15 @@
             android:exported="true"
             android:label="信息"
             android:parentActivityName=".activity.MainActivity" />
-        <!-- SDL 通信服务（前台服务，常驻） -->
+        <!-- SDL 通信服务（前台服务）
+             ★ exported 必须为 true（官方 Integration Basics - Java 明确要求）：
+               RouterService / 系统可能从应用外部启动它，应用在后台时尤其需要。
+               Android 12+ 官方推荐走 PendingIntent（见 SdlReceiver.onSdlEnabled），
+               两种方式并存，exported=true 是兜底。 -->
         <service
             android:name=".service.SdlService"
-            android:exported="false"
+            android:enabled="true"
+            android:exported="true"
             android:foregroundServiceType="connectedDevice" />
 
         <!-- ===== SDL 传输层 =====

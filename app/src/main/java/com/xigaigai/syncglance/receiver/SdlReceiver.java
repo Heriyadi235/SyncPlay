@@ -1,11 +1,13 @@
 package com.xigaigai.syncglance.receiver;
 
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 
 import com.smartdevicelink.transport.SdlBroadcastReceiver;
 import com.smartdevicelink.transport.SdlRouterService;
+import com.smartdevicelink.transport.TransportConstants;
 import com.xigaigai.syncglance.service.SdlService;
 import com.xigaigai.syncglance.util.Log2;
 
@@ -54,12 +56,31 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     /**
      * 车机已经连上 RouterService，把 SDL 服务拉起来建 proxy。
      *
-     * 这里不传 FORCE_RESET —— 此刻通常还没有有效 proxy，
-     * {@code SdlService.needRebuild()} 自然会判断要不要新建。
+     * <h3>启动方式（官方 Integration Basics - Java 的分级写法）</h3>
+     *
+     * <ol>
+     *   <li><b>Android 12 (S) 及以上</b>：从 intent 里取
+     *       {@code TransportConstants.PENDING_INTENT_EXTRA}，用
+     *       {@code pendingIntent.send(context, 0, intent)} 启动。
+     *       这是官方推荐做法 —— 绕开「后台启动前台服务」的限制，
+     *       不需要我们把 SdlService 暴露给谁直接 start。</li>
+     *   <li><b>Android O ~ R，以及拿不到 PendingIntent 的情况</b>：
+     *       {@code context.startForegroundService(intent)}。</li>
+     *   <li><b>Android O 以下</b>：{@code context.startService(intent)}。</li>
+     * </ol>
+     *
+     * ★ 以前只实现了第 2、3 种。车机连上时如果应用在后台，
+     *   Router 想拉起我们可能被系统拒绝（后台启动前台服务受限）——
+     *   本机暂时没复现，但这是官方推荐路径，补齐更稳。
      */
     @Override
     public void onSdlEnabled(Context context, Intent intent) {
         Log2.i(TAG, "★ onSdlEnabled —— 车机已连通 RouterService，启动 SdlService");
+
+        // ① 官方 Android 12+ 路径：用 Router 递过来的 PendingIntent 启动
+        if (startViaPendingIntent(context, intent)) return;
+
+        // ② 退路：自己 startForegroundService / startService
         try {
             Intent i = new Intent(context, SdlService.class);
             if (intent != null) {
@@ -74,6 +95,35 @@ public class SdlReceiver extends SdlBroadcastReceiver {
             }
         } catch (Exception e) {
             Log2.e(TAG, "onSdlEnabled 启动 SdlService 失败", e);
+        }
+    }
+
+    /**
+     * 尝试走官方 Android 12+ 的 PendingIntent 启动方式。
+     *
+     * @return true = 已经通过 PendingIntent 启动，调用方不要再自己 start
+     */
+    private boolean startViaPendingIntent(Context context, Intent intent) {
+        if (intent == null) return false;
+        Object extra;
+        try {
+            extra = intent.getParcelableExtra(TransportConstants.PENDING_INTENT_EXTRA);
+        } catch (Exception e) {
+            return false;
+        }
+        if (!(extra instanceof PendingIntent)) return false;
+
+        try {
+            ((PendingIntent) extra).send(context, 0, intent);
+            Log2.i(TAG, "已通过 PendingIntent 启动 SdlService（Android 12+ 官方推荐方式）");
+            return true;
+        } catch (PendingIntent.CanceledException e) {
+            Log2.w(TAG, "PendingIntent 已失效，退回 startForegroundService");
+            return false;
+        } catch (Exception e) {
+            Log2.w(TAG, "PendingIntent.send 失败（" + e.getClass().getSimpleName()
+                    + "），退回 startForegroundService");
+            return false;
         }
     }
 

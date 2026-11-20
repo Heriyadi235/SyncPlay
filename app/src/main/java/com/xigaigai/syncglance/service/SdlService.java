@@ -322,6 +322,23 @@ public class SdlService extends Service {
             try { old.dispose(); } catch (Exception ignored) { }
         }
         instance = null;
+
+        /*
+         * ★ 官方 Integration Basics - Java「Exiting the Foreground」：
+         *
+         *   "It's important that you don't leave your notification in the notification
+         *    tray as it is very confusing to users. So in the onDestroy method in your
+         *    service, simply call the stopForeground method."
+         *
+         *   这里只撤掉前台状态并移除通知，**不删通知渠道** ——
+         *   渠道是用户可见的设置项（可能被用户调过重要性），删了下次要重建，
+         *   而且用户的选择会丢。官方示例里 `deleteNotificationChannel` 那段
+         *   也标了 "If this is the only notification on your channel"。
+         */
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } catch (Exception ignored) { }
+
         super.onDestroy();
     }
 
