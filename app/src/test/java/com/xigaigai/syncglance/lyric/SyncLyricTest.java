@@ -109,10 +109,48 @@ public class SyncLyricTest {
     @Test
     public void 签名不符视为无效() {
         // 伪造一份签名不对的文件内容：read() 走文件，这里直接验证签名常量可比较
-        assertTrue(SyncLyric.signature().startsWith("#syncglance sync-lyric v1"));
+        assertTrue(SyncLyric.signature().startsWith("#syncglance sync-lyric v2"));
         // 空列表不是成品
         assertFalse(SyncLyric.isPrebuilt(null));
         assertNull(SyncLyric.pageAt(null, 0));
+    }
+
+    @Test
+    public void 折行优先在空格处断_不切断单词() {
+        // 旧实现：cutAtWidth 在 ±3 内找不到空格就硬切 → "NO KONPY" / "UUTAA NO"
+        String[] two = SyncLyric.splitTwo("NO KONPYUUTAA NO");
+        assertEquals("NO KONPYUUTAA", two[0]);
+        assertEquals("NO", two[1]);
+
+        // 英语长句：两行都必须落在词边界
+        String[] en = SyncLyric.splitTwo("this is a very long line");
+        assertEquals("this is a", en[0]);
+        assertEquals("very long line", en[1]);
+    }
+
+    @Test
+    public void 每屏时长按字数比例分配() {
+        // 宽 35 → 两屏；两屏宽度不同，第二屏开始时间应按宽度占比
+        String text = "君 no 名 wa 君 no 名 wa 君 no 名 wa";
+        List<Lrc.Page> pages = Lrc.planPages(text, 0, 30000, 28);
+        assertEquals(2, pages.size());
+
+        int w0 = Lrc.widthOf(pages.get(0).text);
+        int w1 = Lrc.widthOf(pages.get(1).text);
+        assertTrue(w0 > 0 && w1 > 0);
+        long expect = Math.round(30000.0 * w0 / (w0 + w1));
+
+        assertEquals(0, pages.get(0).timeMs);
+        assertTrue("第二屏起始 " + pages.get(1).timeMs + " 应约等于 " + expect,
+                Math.abs(pages.get(1).timeMs - expect) <= 2);
+        assertTrue(pages.get(1).timeMs < 30000);
+    }
+
+    @Test
+    public void 一屏放得下时不参与分页() {
+        List<Lrc.Page> pages = Lrc.planPages("君 no 名 wa", 1000, 9000, 28);
+        assertEquals(1, pages.size());
+        assertEquals(1000, pages.get(0).timeMs);
     }
 
     @Test

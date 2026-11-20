@@ -161,48 +161,6 @@ public final class Lrc {
     }
 
     /**
-     * 在「半角宽度 n」附近切开，返回前半段。
-     *
-     * 宽度口径与 {@link #widthOf} 一致：汉字 2、ASCII 1。
-     *
-     * 两条规则：
-     *   ① 优先从空格处断开 —— 罗马音（`shi wa se na`）和德语歌词
-     *      从词中间切会很难读，所以在目标位置前后 3 个字符内找最近的空格
-     *   ② 找不到空格才硬切
-     *
-     * ★ 这是折行的<b>唯一实现</b>：实车渲染（StateRenderer）与
-     *   sync 缓存预生成（SyncLyric）都调这里，避免两套折行逻辑漂移。
-     */
-    public static String cutAtWidth(String s, int n) {
-        if (s == null || s.isEmpty()) return "";
-        if (n <= 0) return "";
-
-        // 先按半角宽度找到切点下标
-        int w = 0;
-        int target = -1;
-        for (int i = 0; i < s.length(); i++) {
-            int cw = isWide(s.charAt(i)) ? 2 : 1;
-            if (w + cw > n) { target = i; break; }
-            w += cw;
-        }
-        if (target < 0) return s;              // n 超过整串宽度，不用切
-        if (target == 0) target = 1;           // 至少切一个字符，避免死循环
-
-        // 在 target 前后找最近的空格（窗口 ±3）
-        int best = -1;
-        for (int d = 0; d <= 3; d++) {
-            int right = target + d;
-            if (right < s.length() && s.charAt(right) == ' ') { best = right; break; }
-            int left = target - d;
-            if (left > 0 && s.charAt(left) == ' ') { best = left; break; }
-        }
-        if (best > 0 && best < s.length()) {
-            return s.substring(0, best);
-        }
-        return s.substring(0, target);
-    }
-
-    /**
      * 长句自动翻页。
      *
      * 一句歌词放不下一整屏时（比如 40 个字），按时间把它切成若干段，
@@ -266,21 +224,85 @@ public final class Lrc {
         }
         if (end == Long.MAX_VALUE) end = start + 5000;   // 最后一句没有下文，给 5 秒
 
-        long span = Math.max(1, end - start);
-        int slices = (totalW + capacity - 1) / capacity;
-        long sliceMs = span / slices;
-
-        int which = sliceMs <= 0 ? slices - 1
-                : (int) Math.min(slices - 1, (positionMs - start) / sliceMs);
-
-        // 跳过前 which 屏的宽度，再取一屏
-        String rest = text;
-        for (int k = 0; k < which; k++) {
-            String head = takeWidth(rest, capacity);
-            if (head.length() >= rest.length()) { rest = ""; break; }
-            rest = rest.substring(head.length());
+        List<Page> plan = planPages(text, start, end, capacity);
+        int which = 0;
+        for (int k = 0; k < plan.size(); k++) {
+            if (plan.get(k).timeMs <= positionMs) which = k;
+            else break;
         }
-        res[0] = takeWidth(rest, capacity).trim();
+        res[0] = plan.get(which).text;
         return res;
+    }
+
+    // ---------------- 分页 ----------------
+
+    /**
+     * 一屏歌词：从哪个时刻开始显示、这一屏显示什么。
+     */
+    public static final class Page {
+        public final long timeMs;
+        public final String text;
+
+        public Page(long timeMs, String text) {
+            this.timeMs = timeMs;
+            this.text = text;
+        }
+
+        @Override
+        public String toString() {
+            return "[" + timeMs + "]" + text;
+        }
+    }
+
+    /**
+     * 把一句放不下一屏的歌词切成若干屏，并按<b>每屏字数（半角宽度）比例</b>分配时间。
+     *
+     * 为什么按宽度比例而不是平均分：一屏字多，唱的时间理应更长；
+     * 平均分会让「只剩两三个字」的最后一屏也占掉同样长的时间。
+     * 代价是极窄的一屏可能不足 1 秒，而车机最快 1 秒才刷一次
+     * （已知取舍，见 docs/design.md §2.5）。
+     *
+     * ★ 这是<b>分页的唯一实现</b>：实车降级路径（{@link #paged}）与
+     *   sync 成品预生成（{@code SyncLyric.build}）共用，保证两处观感一致。
+     *
+     * @param capacity 一屏能放的半角宽度（perLine × pages）
+     */
+    public static List<Page> planPages(String text, long startMs, long endMs, int capacity) {
+        List<Page> out = new ArrayList<>();
+        if (text == null || text.isEmpty()) return out;
+        int cap = Math.max(1, capacity);
+
+        if (widthOf(text) <= cap) {
+            out.add(new Page(startMs, text));
+            return out;
+        }
+
+        // 按宽度切片
+        List<String> pieces = new ArrayList<>();
+        String rest = text;
+        while (!rest.isEmpty()) {
+            String raw = takeWidth(rest, cap);
+            if (raw.isEmpty()) raw = rest.substring(0, 1);   // 防御：至少前进一个字符
+            rest = rest.substring(raw.length());
+            String piece = raw.trim();
+            if (!piece.isEmpty()) pieces.add(piece);
+        }
+        if (pieces.isEmpty()) {
+            out.add(new Page(startMs, text));
+            return out;
+        }
+
+        // 每屏时长 ∝ 该屏宽度
+        int sum = 0;
+        for (String p : pieces) sum += widthOf(p);
+        if (sum <= 0) sum = 1;
+
+        long span = Math.max(1L, endMs - startMs);
+        double elapsed = 0;
+        for (String p : pieces) {
+            out.add(new Page(startMs + (long) elapsed, p));
+            elapsed += (double) span * widthOf(p) / sum;
+        }
+        return out;
     }
 }

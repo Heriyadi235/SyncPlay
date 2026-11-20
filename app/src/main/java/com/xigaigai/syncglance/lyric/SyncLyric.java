@@ -21,11 +21,11 @@ import java.util.List;
  *   所以这里把「转写 + 折行 + 翻页」全部离线做完，存成一份新的 LRC，
  *   显示时直接按时间取行即可。
  *
- * 文件：{@code <cacheDir>/<md5>.v1-14x2.sync.lrc}
+ * 文件：{@code <cacheDir>/<md5>.v2-14x2.sync.lrc}
  *
  * 格式：
  * <pre>
- * #syncglance sync-lyric v1; units=14; pages=2; romaji=hepburn
+ * #syncglance sync-lyric v2; units=14; pages=2; romaji=hepburn
  * [00:12.340]私 wa 学生 desu␟
  * [00:16.100]君 no 名 wa␟Ki mi no na wa
  * </pre>
@@ -44,8 +44,11 @@ public final class SyncLyric {
     public static final int LINE_UNITS = 14;
     /** 一屏给歌词几行 */
     public static final int PAGES = 2;
-    /** 规则版本：转写规则或折行算法一变就加一 */
-    private static final String VERSION = "v1";
+    /**
+     * 规则版本：转写规则、折行算法或分页时间分配一变就加一。
+     * v2：折行改为「优先在空格处断」+ 每屏时长按字数比例。
+     */
+    private static final String VERSION = "v2";
 
     /**
      * 一屏内两行的分隔符。
@@ -104,7 +107,7 @@ public final class SyncLyric {
                 continue;
             }
 
-            // 超过一屏：按时间切成若干屏（与 Lrc.paged 的观感一致）
+            // 超过一屏：先找下一句的开始时刻，作为这一句的时间窗口右端
             long end = Long.MAX_VALUE;
             for (int j = i + 1; j < src.size(); j++) {
                 if (src.get(j).text != null && !src.get(j).text.trim().isEmpty()) {
@@ -114,18 +117,9 @@ public final class SyncLyric {
             }
             if (end == Long.MAX_VALUE) end = line.timeMs + 5000;
 
-            long span = Math.max(1, end - line.timeMs);
-            int slices = (w + capacity - 1) / capacity;
-            long sliceMs = Math.max(1, span / slices);
-
-            String rest = roma;
-            for (int k = 0; k < slices && !rest.isEmpty(); k++) {
-                long t = line.timeMs + sliceMs * k;
-                String raw = Lrc.takeWidth(rest, capacity);
-                rest = rest.substring(Math.min(rest.length(), raw.length()));
-                String piece = raw.trim();
-                if (piece.isEmpty()) continue;
-                appendPage(out, t, piece);
+            // ★ 分页的唯一实现（含「每屏时长按字数比例」），与 Lrc.paged 共用
+            for (Lrc.Page page : Lrc.planPages(roma, line.timeMs, end, capacity)) {
+                appendPage(out, page.timeMs, page.text);
                 produced++;
             }
         }
@@ -143,23 +137,30 @@ public final class SyncLyric {
     /**
      * 把一屏文本折成最多两行，<b>保证每行 ≤ LINE_UNITS</b>、且不丢字。
      *
-     * ① 优先对半折（观感与原实现一致）
-     * ② 对半后如果第二行超宽（空格窗口导致），改成「尽量填满第一行」
-     * ③ 再不行就按宽度硬切 —— 宁可断词，不能溢出被车机截成省略号
+     * 三条路径，<b>优先空格</b>：
+     *   ① 「对半、但只在空格处断」—— 观感最均衡，且不会切断单词
+     *   ② 对半处附近没有空格（中点落在一个长单词里）→ 尽量填满第一行，
+     *      仍然只在空格处断，让第二行尽量完整
+     *   ③ 整屏一个空格都没有（纯中文 / 一个超长单词）→ 按宽度硬切
+     *
+     * 历史：原来 ① 直接用 {@code Lrc.cutAtWidth}（±3 窗口内找不到空格就硬切），
+     * 于是 `NO KONPYUUTAA NO` 会被折成 `NO KONPY` + `UUTAA NO`（词中被切断）。
      */
     public static String[] splitTwo(String text) {
         if (text == null) return new String[]{"", ""};
         if (Lrc.widthOf(text) <= LINE_UNITS) return new String[]{text, ""};
         int w = Lrc.widthOf(text);
 
-        // ① 对半
-        String a = Lrc.cutAtWidth(text, w / 2);
-        String b = text.substring(Math.min(a.length(), text.length())).trim();
-        if (!a.trim().isEmpty() && Lrc.widthOf(a) <= LINE_UNITS && Lrc.widthOf(b) <= LINE_UNITS) {
-            return new String[]{a.trim(), b};
+        // ① 对半，但必须落在空格上
+        String a = headAtSpace(text, w / 2);
+        if (a != null) {
+            String b = text.substring(a.length()).trim();
+            if (!b.isEmpty() && Lrc.widthOf(a) <= LINE_UNITS && Lrc.widthOf(b) <= LINE_UNITS) {
+                return new String[]{a.trim(), b};
+            }
         }
 
-        // ② 尽量填满第一行（在空格处断）
+        // ② 尽量填满第一行（空格处断）
         int acc = 0;
         int cut = -1;
         for (int i = 0; i < text.length(); i++) {
@@ -176,10 +177,27 @@ public final class SyncLyric {
             }
         }
 
-        // ③ 硬切
+        // ③ 没有任何可用空格 → 按宽度硬切（宁可断词，也不能溢出被车机截成省略号）
         String a3 = Lrc.takeWidth(text, LINE_UNITS).trim();
         String b3 = text.substring(Math.min(a3.length(), text.length())).trim();
         return new String[]{a3, b3};
+    }
+
+    /**
+     * 在宽度 {@code target} 处切开，但**只在附近有空格时才切**。
+     *
+     * @return 前半段（不含分隔空格）；附近 3 个字符内没有空格时返回 null，
+     *         由调用方改用别的策略（不硬切）
+     */
+    private static String headAtSpace(String s, int target) {
+        if (target <= 0 || target >= s.length()) return null;
+        for (int d = 0; d <= 3; d++) {
+            int i = target - d;
+            if (i > 0 && i < s.length() && s.charAt(i) == ' ') {
+                return s.substring(0, i);
+            }
+        }
+        return null;
     }
 
     // ---------------- 读写 ----------------
