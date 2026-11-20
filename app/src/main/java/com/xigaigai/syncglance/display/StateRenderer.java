@@ -801,6 +801,16 @@ public class StateRenderer {
                 timerActive = false;         // ★ 只有清零才真正释放屏幕
                 break;
         }
+
+        /*
+         * ★ 必须 markDirty，否则预览不跟着变。
+         *
+         *   上一版漏了这一行：setTimerRunning() 里有、这里没有。
+         *   于是点「正计时/倒计时/暂停/清零」时，只有 RPC 发了出去（车机正常），
+         *   而 lastFrame 不重建 —— LogActivity 里的屏幕预览拿到的还是旧帧，
+         *   计时器那一格完全不动（有歌在播时才碰巧对，因为播放位置心跳会顺带刷新）。
+         */
+        markDirty("timerState");
     }
 
     public long getTimerStartMillis() { return timerStartMillis; }
@@ -840,6 +850,63 @@ public class StateRenderer {
      *
      * @return 需要发送的 RPC；不需要返回 null
      */
+    /**
+     * 用户计时器指令 → {@link SetMediaClockTimer}。
+     *
+     * <b>只构造，不发送</b>：发不发、发不出去怎么办，由调用方
+     * （{@code SyncPlayCore}）决定。这样计时器的"本地状态"和"发 RPC"
+     * 就解耦了 —— 没连车机时本地状态照样更新，屏幕预览才是对的。
+     *
+     * ⚠ 调用前必须先 {@link #setTimerState}：PAUSE 的定格读数依赖它记下的
+     *   {@code timerPausedAt}，顺序反了会算出"还在走"的值。
+     */
+    public SetMediaClockTimer timerRpc(int h, int m, int s, String mode) {
+        UpdateMode um;
+        try {
+            um = UpdateMode.valueForString(mode);
+        } catch (Exception e) {
+            um = UpdateMode.COUNTUP;
+        }
+
+        switch (um) {
+            case PAUSE: {
+                // 暂停时也要把时间停在屏上。
+                // pauseWithPlayPauseIndicator() 只发 UPDATE_MODE=PAUSE、不带 startTime，
+                // 车机很可能把那一格清空；所以把定格读数写成新的 startTime 再置 PAUSE。
+                long sec = timerElapsedSeconds();
+                int hh = (int) (sec / 3600);
+                int mm = (int) ((sec / 60) % 60);
+                int ss = (int) (sec % 60);
+                Log2.i(TAG, "计时器暂停，定格在 " + hh + ":" + mm + ":" + ss);
+                return SetMediaClockTimer.updatePauseWithNewStartTime(
+                        clockStart(hh, mm, ss), null, AudioStreamingIndicator.PAUSE);
+            }
+            case RESUME:
+                return SetMediaClockTimer.resumeWithPlayPauseIndicator(AudioStreamingIndicator.PLAY);
+            case CLEAR:
+                return SetMediaClockTimer.clearWithPlayPauseIndicator(AudioStreamingIndicator.PAUSE);
+            case COUNTDOWN:
+                return SetMediaClockTimer.countDownFromStartTime(
+                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY);
+            case COUNTUP:
+            default:
+                return SetMediaClockTimer.countUpFromStartTime(
+                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY);
+        }
+    }
+
+    /**
+     * 车机时钟格只有 mm:ss，没有小时位：
+     *   - hours ≠ 0 会被判 REJECTED（实测 16:21 连拒两次）
+     *   - 超过 59:59 的读数夹到上限，宁可停格也不要被整条拒掉
+     */
+    private static StartTime clockStart(int h, int m, int s) {
+        long total = h * 3600L + m * 60L + s;
+        if (total < 0) total = 0;
+        if (total > 3599) total = 3599;
+        return new StartTime(0, (int) (total / 60), (int) (total % 60));
+    }
+
     public SetMediaClockTimer songClockRpc() {
         if (timerRunning) return null;
         if (sender == null) return null;

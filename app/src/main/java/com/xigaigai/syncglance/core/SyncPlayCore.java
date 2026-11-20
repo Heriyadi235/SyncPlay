@@ -2,6 +2,7 @@ package com.xigaigai.syncglance.core;
 
 import android.content.Context;
 
+import com.smartdevicelink.proxy.rpc.SetMediaClockTimer;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
 import com.xigaigai.syncglance.lyric.Lrc;
@@ -34,16 +35,16 @@ import java.util.List;
  *   - 出口：{@link StateRenderer.Sender}（把一条 RPC 交出去）
  * 换车机 / 换 AppLink 应用时，替换数据源与 Sender 即可，渲染逻辑可整体搬走。
  */
-public final class SyncCore {
+public final class SyncPlayCore {
 
     private static final String TAG = "Core";
 
-    private static volatile SyncCore instance;
+    private static volatile SyncPlayCore instance;
 
-    public static SyncCore get() {
+    public static SyncPlayCore get() {
         if (instance == null) {
-            synchronized (SyncCore.class) {
-                if (instance == null) instance = new SyncCore();
+            synchronized (SyncPlayCore.class) {
+                if (instance == null) instance = new SyncPlayCore();
             }
         }
         return instance;
@@ -69,7 +70,7 @@ public final class SyncCore {
     /** 上一次记进日志的导航摘要（降噪用） */
     private String lastNavLog;
 
-    private SyncCore() { }
+    private SyncPlayCore() { }
 
     // ---------------- 初始化 ----------------
 
@@ -99,7 +100,7 @@ public final class SyncCore {
             AmapLinkClient.setNavListener(navListener);
             AmapLinkClient.get(app).start();
 
-            Log2.i(TAG, "SyncCore 初始化完成（数据采集与连接层已解耦）");
+            Log2.i(TAG, "SyncPlayCore 初始化完成（数据采集与连接层已解耦）");
         }
     }
 
@@ -147,6 +148,80 @@ public final class SyncCore {
     public Navigation navigation() { return renderer.getNavigation(); }
 
     // ---------------- 动作 ----------------
+
+    /**
+     * 用户计时器：正计时 / 倒计时 / 暂停 / 继续 / 清零。
+     *
+     * <h3>为什么放在这里，而不是 SdlService</h3>
+     * 计时器是**本地状态**（车机拿到指令后自己走表），跟连接没有必然关系：
+     * 没连车机时也该能设、屏幕预览也该能看到。
+     *
+     * 而 {@code SdlService} 现在是「断开就 stopSelf」（官方语义），平时根本不存在，
+     * 挂在它上面的按钮会直接 "服务未启动" 而什么都不做 —— 之前就踩了这个坑。
+     *
+     * 所以流程改成：
+     *   ① 先更新 {@link StateRenderer} 的本地计时状态（预览立刻正确）
+     *   ② 再构造 RPC
+     *   ③ **有连接才发**；没连接就记一个待发标记，等连上后由
+     *      {@link #resendTimerIfPending()} 补发
+     */
+    public void doTimer(int h, int m, int s, String mode) {
+        lastTimerMode = mode;
+        lastTimerH = h;
+        lastTimerM = m;
+        lastTimerS = s;
+
+        // ① 先冻结本地状态（PAUSE 要靠它记下 timerPausedAt）
+        renderer.setTimerState(h, m, s, mode);
+        // 用户计时器接管后，歌曲计时作废
+        renderer.resetSongClock();
+
+        // ② 构造 RPC
+        SetMediaClockTimer t;
+        try {
+            t = renderer.timerRpc(h, m, s, mode);
+        } catch (Exception e) {
+            Log2.w(TAG, "构造计时器 RPC 失败: " + e.getMessage());
+            return;
+        }
+        if (t == null) return;
+
+        // ③ 有连接才发
+        StateRenderer.Sender sn = sender;
+        if (sn == null || !lifecycle.canSendRpc()) {
+            timerPendingSend = true;
+            Log2.i(TAG, "计时器已更新本地状态（未连接，暂不发送）: " + mode);
+            return;
+        }
+        timerPendingSend = false;
+        t.setCorrelationID(nextCorr());
+        sn.send(t);
+        Log2.i(TAG, "计时器已发送: " + mode);
+    }
+
+    /**
+     * 连上并进入 FULL 后调用：把"没发出去的计时器指令"补发一次。
+     *
+     * 场景：用户没连车机时设了计时器（本地状态已生效），之后车机连上。
+     */
+    public void resendTimerIfPending() {
+        if (!timerPendingSend) return;
+        if (sender == null || !lifecycle.canSendRpc()) return;
+        Log2.i(TAG, "补发计时器指令: " + lastTimerMode);
+        timerPendingSend = false;
+        doTimer(lastTimerH, lastTimerM, lastTimerS, lastTimerMode);
+    }
+
+    public boolean isTimerPendingSend() { return timerPendingSend; }
+
+    /** correlation ID 由本类统一分配（服务没起来时也要能用） */
+    private int corrId = 1000;
+
+    private int nextCorr() { return corrId++; }
+
+    private volatile boolean timerPendingSend = false;
+    private volatile int lastTimerH = 0, lastTimerM = 0, lastTimerS = 0;
+    private volatile String lastTimerMode = "COUNTUP";
 
     /** 「显示歌词」：重新走一遍加载（内存缓存命中会立刻回调，不联网） */
     public void reloadLyrics() {

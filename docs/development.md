@@ -760,12 +760,12 @@ IO 是单线程且请求不可取消。快速切歌 A→B→A 时，A 的旧网�
 | `TitleNorm` | 只决定「怎么查」，不参与缓存身份 | `stripBrackets()` / `primaryArtist()` |
 | `NeteaseLyric` | 主源：搜索 + 拉 lrc + 候选打分 | `fetch()` / `pickBest()` |
 | `StateRenderer` | 取当前屏、0.5 秒提前量、900ms 心跳 | `computeLyricLines()` |
-| `SyncCore` / `SdlService` | 换歌入口、清旧歌词、「显示歌词」重载 | `onNowPlaying` / `reloadLyrics()` |
+| `SyncPlayCore` / `SdlService` | 换歌入口、清旧歌词、「显示歌词」重载 | `onNowPlaying` / `reloadLyrics()` |
 
 依赖是单向无环的：
 
 ```
-SdlService / SyncCore  →  LyricManager  →  { NeteaseLyric, SyncLyric, Romaji }  →  Lrc
+SdlService / SyncPlayCore  →  LyricManager  →  { NeteaseLyric, SyncLyric, Romaji }  →  Lrc
 StateRenderer          →  { SyncLyric, Lrc }
 Romaji                 →  Kana（底层假名表）
 ```
@@ -781,7 +781,7 @@ Romaji                 →  Kana（底层假名表）
 
 ```
 NotificationCatcher（每条通知都会触发）
-  → SyncCore.onNowPlaying(np)
+  → SyncPlayCore.onNowPlaying(np)
       songChanged = !np.sameSong(cur)        // 只比 title + artist，精确相等
       renderer.setSong(np)
       if (songChanged) {

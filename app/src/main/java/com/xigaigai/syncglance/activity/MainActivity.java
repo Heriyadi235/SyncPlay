@@ -20,7 +20,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.xigaigai.syncglance.R;
-import com.xigaigai.syncglance.core.SyncCore;
+import com.xigaigai.syncglance.core.SyncPlayCore;
 import com.xigaigai.syncglance.display.CharProbe;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
@@ -259,19 +259,26 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void toggleNavMode() {
-        SdlService s = SdlService.getInstance();
-        if (s == null) { toast("服务未启动"); return; }
-        boolean on = !s.isManualNavMode();
-        s.setManualNavMode(on);
+        // 导航模式是本地开关（SyncPlayCore 里本来就有），不必依赖 SdlService 实例
+        boolean on = !SyncPlayCore.get().isManualNavMode();
+        SyncPlayCore.get().setManualNavMode(on);
         toast("导航模式：" + (on ? "开" : "关"));
     }
 
     // ---------------- 计时器 ----------------
 
     private void timer(int h, int m, int s, String mode) {
-        SdlService svc = SdlService.getInstance();
-        if (svc == null) { toast("服务未启动"); return; }
-        svc.doTimer(h, m, s, mode);
+        /*
+         * ★ 直接走 SyncPlayCore，不再依赖 SdlService 实例。
+         *
+         *   计时器是本地状态（车机拿到指令后自己走表），没连车机也该能设、
+         *   屏幕预览也该看得到。而 SdlService 现在是「断开就 stopSelf」
+         *   （官方语义），平时根本不存在 —— 以前走 getInstance() 就会
+         *   直接 return "服务未启动"，连预览都不动。
+         *
+         *   RPC 发不发由 SyncPlayCore 判断：没连接就先记着，连上后自动补发。
+         */
+        SyncPlayCore.get().doTimer(h, m, s, mode);
     }
 
     /**
@@ -402,11 +409,11 @@ public class MainActivity extends AppCompatActivity {
      * 刷新状态栏。
      *
      * ★ 状态不再依赖 SdlService 是否存活：连接状态、媒体、导航分别来自
-     *   SyncCore.lifecycle() / renderer / AmapLinkClient，
+     *   SyncPlayCore.lifecycle() / renderer / AmapLinkClient，
      *   服务退出（没连车机时 SDL 5.x 会这样）也照样能看到手机侧状态。
      */
     private void refreshState() {
-        SyncCore core = SyncCore.get();
+        SyncPlayCore core = SyncPlayCore.get();
         StringBuilder sb = new StringBuilder();
 
         sb.append("连接：").append(core.lifecycle().describe());
@@ -421,9 +428,9 @@ public class MainActivity extends AppCompatActivity {
         updateSoftButtonLabel(core.renderer().getSoftKeyCount());
     }
 
-    /** 媒体状态文字：歌名 / 歌手 [播放|暂停]（数据来自 SyncCore） */
+    /** 媒体状态文字：歌名 / 歌手 [播放|暂停]（数据来自 SyncPlayCore） */
     private String mediaStatusText() {
-        com.xigaigai.syncglance.model.NowPlaying np = SyncCore.get().song();
+        com.xigaigai.syncglance.model.NowPlaying np = SyncPlayCore.get().song();
         if (np == null || !np.hasData()) return "—";
 
         StringBuilder sb = new StringBuilder();

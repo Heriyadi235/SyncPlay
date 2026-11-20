@@ -734,8 +734,33 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
    绕开「后台启动前台服务」的限制
 
 > 我们额外做、官方 Integration Basics 里没有的：通知监听（`NotificationCatcher`）、
-> 高德 AmapLink 解密、`SyncCore` 把数据采集与连接层解耦。这些属于业务，不影响
+> 高德 AmapLink 解密、`SyncPlayCore` 把数据采集与连接层解耦。这些属于业务，不影响
 > SDL 生命周期主链路。
+
+### 5.10 职责边界：`SyncPlayCore` vs `SdlService`
+
+`SdlService` 现在按官方语义「断开就 `stopSelf`」，**平时根本不存在**
+（只在车机连接期间活着）。所以凡是「连接不在也该能用」的东西，不能挂在它上面。
+
+| 能力 | 归属 | 服务不在时 |
+|---|---|---|
+| 数据采集（音乐通知 / 高德导航） | `SyncPlayCore` | ✅ 正常 |
+| 渲染与**屏幕预览**（`StateRenderer` + `ScreenFrame` + `ScreenPreviewView`） | `SyncPlayCore` / 独立预览器 | ✅ 正常 |
+| **计时器**（正/倒/暂停/清零） | `SyncPlayCore.doTimer()` | ✅ 本地状态生效、预览正确；RPC 记 pending |
+| **导航模式**开关 | `SyncPlayCore` | ✅ 正常 |
+| 歌词加载与缓存 | `SyncPlayCore` | ✅ 正常 |
+| 发 RPC / 重置连接 / 软键测试 / 字符测试 | `SdlService` | ❌ 报「服务未启动」是正确的 |
+
+**踩过的坑**：计时器原本写在 `SdlService.doTimer()` 里，`MainActivity` 走
+`SdlService.getInstance()`。服务常驻时看着没问题；一改成官方语义（断开就退出），
+点计时器就变成「服务未启动」直接 return —— **连屏幕预览都不动了**。
+
+修复：计时器搬进 `SyncPlayCore`，内部拆成三步
+「① 更新本地状态 → ② 构造 RPC → ③ 有连接才发，没连接记 pending」，
+连上后由 `SdlService.initializeForConnection()` 调 `resendTimerIfPending()` 补发。
+
+> 另外 `setTimerState()` 曾漏了 `markDirty()`（`setTimerRunning()` 有、它没有），
+> 导致点了计时器只有 RPC 发出去、`lastFrame` 不重建，预览那一格不动 —— 一并修了。
 
 ---
 

@@ -388,7 +388,7 @@ protected static void pingRouterService(Context, String, String);
 | 重连 | 只靠 `ACL_CONNECTED` → `SdlReceiver` → 重新 `onStartCommand` → 重建 `SdlManager` |
 | 重试 | **没有**应用层定时重试（踩过坑，见 §3.5） |
 | 通知 | 前台服务通知，寿命 = 服务寿命；正文只报状态枚举，不拼歌名 |
-| 数据与连接解耦 | 采集/渲染在应用级单例 `SyncCore`，连接层退出后预览仍可工作 |
+| 数据与连接解耦 | 采集/渲染在应用级单例 `SyncPlayCore`，连接层退出后预览仍可工作 |
 
 ---
 

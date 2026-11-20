@@ -3,7 +3,7 @@ package com.xigaigai.syncglance;
 import android.app.Application;
 import android.os.Build;
 
-import com.xigaigai.syncglance.core.SyncCore;
+import com.xigaigai.syncglance.core.SyncPlayCore;
 import com.xigaigai.syncglance.receiver.SdlReceiver;
 import com.xigaigai.syncglance.util.Log2;
 
@@ -12,7 +12,7 @@ import com.xigaigai.syncglance.util.Log2;
  *
  * <h3>两件事</h3>
  * <ol>
- *   <li>把 {@link SyncCore} 尽早初始化 —— 这样即使 SDL 服务还没起来
+ *   <li>把 {@link SyncPlayCore} 尽早初始化 —— 这样即使 SDL 服务还没起来
  *       （甚至因为没连车机而退出），数据采集与车机屏幕预览也能独立工作。
  *       这是把预览器从连接层解耦的前提。</li>
  *   <li><b>官方推荐的「补连接」</b>：启动时主动问一句「现在有没有已连接的
@@ -38,7 +38,7 @@ import com.xigaigai.syncglance.util.Log2;
  * 所以这里用进程名过滤，只在主进程做补连接。
  *
  * 将来把预览器抽成独立库时，宿主 App 只要在自己的 Application 里调一次
- * {@code SyncCore.get().init(this)} 即可。
+ * {@code SyncPlayCore.get().init(this)} 即可。
  */
 public class SyncGlanceApp extends Application {
 
@@ -53,7 +53,7 @@ public class SyncGlanceApp extends Application {
          *   但数据采集层只要主进程要。
          *
          *   RouterService 跑在独立进程（com.smartdevicelink.router），
-         *   它如果也 init SyncCore，会连带做这些完全没用的事：
+         *   它如果也 init SyncPlayCore，会连带做这些完全没用的事：
          *     - 初始化 StateRenderer / LyricManager（主进程才需要）
          *     - 绑定高德 NaviService（两个进程抢同一个绑定）
          *     - 注册音乐通知监听回调
@@ -63,7 +63,7 @@ public class SyncGlanceApp extends Application {
 
         if (!isMainProcess()) return;
 
-        SyncCore.get().init(this);
+        SyncPlayCore.get().init(this);
 
         Log2.i(TAG, "应用启动，补一次「现在有没有已连接的车机」探测");
         if (SdlReceiver.pokeIfBluetoothConnected(this)) return;

@@ -88,7 +88,7 @@ public class SdlService extends Service {
     private int corrId = 1;
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    /** 渲染器与生命周期都来自 SyncCore（应用级），这里只是引用 */
+    /** 渲染器与生命周期都来自 SyncPlayCore（应用级），这里只是引用 */
     private StateRenderer renderer;
     private SyncLifecycle lifecycle = new SyncLifecycle();
     private boolean menusBuilt = false;
@@ -98,9 +98,9 @@ public class SdlService extends Service {
     public SyncLifecycle getLifecycle() { return lifecycle; }
     public StateRenderer getRenderer() { return renderer; }
 
-    /** 当前歌词（给屏幕预览用）—— 数据源在 SyncCore */
+    /** 当前歌词（给屏幕预览用）—— 数据源在 SyncPlayCore */
     public java.util.List<com.xigaigai.syncglance.lyric.Lrc.Line> getLyrics() {
-        return com.xigaigai.syncglance.core.SyncCore.get().lyrics();
+        return com.xigaigai.syncglance.core.SyncPlayCore.get().lyrics();
     }
 
     /**
@@ -111,7 +111,7 @@ public class SdlService extends Service {
      * 内存缓存命中会立刻同步回调，不会重新联网。
      */
     public void reloadLyrics() {
-        com.xigaigai.syncglance.core.SyncCore.get().reloadLyrics();
+        com.xigaigai.syncglance.core.SyncPlayCore.get().reloadLyrics();
     }
 
     /**
@@ -138,7 +138,7 @@ public class SdlService extends Service {
         Log2.init(this);
 
         /*
-         * ★ 数据采集与渲染状态都归 SyncCore 管（应用级单例，由 SyncGlanceApp 初始化）。
+         * ★ 数据采集与渲染状态都归 SyncPlayCore 管（应用级单例，由 SyncGlanceApp 初始化）。
          *
          *   SdlService 只负责「连接 + 发送」：
          *     连上  → attachSender()，渲染器的出站 RPC 就能送出去
@@ -147,8 +147,8 @@ public class SdlService extends Service {
          *   这样即使服务因为「没连车机」而退出（SDL 5.x 的正常语义），
          *   界面上的车机预览也不会变成空画布。
          */
-        com.xigaigai.syncglance.core.SyncCore core =
-                com.xigaigai.syncglance.core.SyncCore.get();
+        com.xigaigai.syncglance.core.SyncPlayCore core =
+                com.xigaigai.syncglance.core.SyncPlayCore.get();
         core.init(this);
         core.setOnDataChanged(this::updateNotification);
         renderer = core.renderer();
@@ -310,11 +310,11 @@ public class SdlService extends Service {
         /*
          * ★ 这里绝对不能再 NotificationCatcher.setMusicListener(null)。
          *
-         *   那个监听器现在是 SyncCore（应用级）注册的，服务只是"借用连接"。
+         *   那个监听器现在是 SyncPlayCore（应用级）注册的，服务只是"借用连接"。
          *   服务一销毁就把它置空，等于把数据采集也掐死了：
          *   界面上预览会一直停在「空闲 / 问候语」，歌曲永远进不来（踩过）。
          */
-        com.xigaigai.syncglance.core.SyncCore.get().detachSender();
+        com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
         disposing = true;
         SdlManager old = sdlManager;
         sdlManager = null;
@@ -504,8 +504,8 @@ public class SdlService extends Service {
 
             sdlManager = builder.build();
             lifecycle.onProxyCreated();
-            // 把发送通道挂到 SyncCore（渲染器与数据采集都在那边）
-            com.xigaigai.syncglance.core.SyncCore.get()
+            // 把发送通道挂到 SyncPlayCore（渲染器与数据采集都在那边）
+            com.xigaigai.syncglance.core.SyncPlayCore.get()
                     .attachSender(msg -> sendRpc((RPCRequest) msg));
             sdlManager.start();
             updateNotification();
@@ -555,7 +555,7 @@ public class SdlService extends Service {
         disposing = true;                 // 告诉 onDestroy()：这是我们主动拆的，别重复收尾
         SdlManager old = sdlManager;
         sdlManager = null;
-        com.xigaigai.syncglance.core.SyncCore.get().detachSender();
+        com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
         if (old != null) {
             try { old.dispose(); } catch (Exception ignored) { }
         }
@@ -657,7 +657,17 @@ public class SdlService extends Service {
 
     // ---------------- 动作 ----------------
 
-    /** 计时器 */
+    /**
+     * 计时器 —— 只做转发。
+     *
+     * 真正的实现搬到了 {@code SyncPlayCore}：计时器是**本地状态**（车机拿到指令后
+     * 自己走表），跟连接没有必然关系；而本 Service 现在是「断开就 stopSelf」
+     * （官方语义），平时根本不存在。挂在服务上的话，没连接时点按钮只会收到
+     * "服务未启动"，连屏幕预览都看不到 —— 踩过。
+     *
+     * 这里保留 `lastTimer*` 与 `pendingTimerResend`，因为"失焦被车机终止后重发"
+     * 确实是连接层的事（见 {@link #resendTimerIfNeeded()}）。
+     */
     public void doTimer(int h, int m, int s, String mode) {
         // 记住参数，失焦被车机终止后回来能补发
         lastTimerMode = mode;
@@ -666,93 +676,7 @@ public class SdlService extends Service {
         lastTimerS = s;
         pendingTimerResend = false;
 
-        UpdateMode um;
-        try { um = UpdateMode.valueForString(mode); }
-        catch (Exception e) { um = UpdateMode.COUNTUP; }
-
-        // ★ 先把本地计时状态冻结（记下 timerPausedAt），
-        //   否则下面 pausedClockValue() 算出来的是"还在走"的值。
-        if (um == UpdateMode.PAUSE) {
-            renderer.setTimerState(h, m, s, "PAUSE");
-        }
-
-        SetMediaClockTimer t;
-        switch (um) {
-            case PAUSE: {
-                // ★ 暂停时也要把时间停在屏上。
-                //
-                //   pauseWithPlayPauseIndicator() 只发 UPDATE_MODE=PAUSE，
-                //   不带 startTime，车机很可能把那一格清空。
-                //   这里用 updatePauseWithNewStartTime(startTime, endTime, indicator)，
-                //   把「暂停那一刻的读数」写成新的 startTime，再置 PAUSE，
-                //   车机就会定格显示这个数字。
-                int[] v = pausedClockValue();
-                t = SetMediaClockTimer.updatePauseWithNewStartTime(
-                        clockTime(v[0], v[1], v[2]), null,
-                        AudioStreamingIndicator.PAUSE);
-                Log2.i(TAG, "计时器暂停，定格在 " + v[0] + ":" + v[1] + ":" + v[2]);
-                break;
-            }
-            case RESUME:
-                t = SetMediaClockTimer.resumeWithPlayPauseIndicator(AudioStreamingIndicator.PLAY);
-                break;
-            case CLEAR:
-                t = SetMediaClockTimer.clearWithPlayPauseIndicator(AudioStreamingIndicator.PAUSE);
-                break;
-            case COUNTDOWN:
-                t = SetMediaClockTimer.countDownFromStartTime(
-                        clockTime(h, m, s), null, AudioStreamingIndicator.PLAY);
-                break;
-            default:
-                t = SetMediaClockTimer.countUpFromStartTime(
-                        clockTime(h, m, s), null, AudioStreamingIndicator.PLAY);
-                break;
-        }
-        t.setCorrelationID(nextCorr());
-        sendRpc(t);
-
-        // 记录完整状态供预览模拟走表（内部会维护 timerRunning / timerActive）
-        renderer.setTimerState(h, m, s, mode);
-        // 用户计时器接管后，歌曲计时作废
-        renderer.resetSongClock();
-    }
-
-    /**
-     * 构造车机认识的时间值。
-     *
-     * SYNC 1.1 的媒体时钟格只有 mm:ss，没有小时位：
-     *   - 照片实测那一格渲染成 "1:55"（分:秒）
-     *   - hours=16 → REJECTED（ETA 试过，连拒两次）
-     *   - minutes=99 → INVALID_DATA
-     *
-     * 所以凡是往 StartTime 里塞时间都必须把小时压成 0，
-     * 超过 59:59 的读数夹到上限，宁可停格也不要被车机整条拒掉。
-     */
-    private static StartTime clockTime(int h, int m, int s) {
-        long total = h * 3600L + m * 60L + s;
-        if (total < 0) total = 0;
-        if (total > 3599) total = 3599;      // 59:59
-        return new StartTime(0, (int) (total / 60), (int) (total % 60));
-    }
-
-    /**
-     * 算出「暂停这一刻」应该定格在什么时间。
-     *
-     * 正计时 → 已经走过的秒数
-     * 倒计时 → 还剩下的秒数
-     *
-     * 数据源是 StateRenderer 里那份本地计时状态（它一直在维护），
-     * 所以不需要额外记一遍。
-     */
-    private int[] pausedClockValue() {
-        long sec = renderer.timerElapsedSeconds();
-
-        // 倒计时把剩余秒数换算成 HH:MM:SS 直接当起始时间；
-        // 正计时同样。车机只认 StartTime，所以这里统一成时分秒。
-        int h = (int) (sec / 3600);
-        int m = (int) ((sec / 60) % 60);
-        int s = (int) (sec % 60);
-        return new int[]{h, m, s};
+        com.xigaigai.syncglance.core.SyncPlayCore.get().doTimer(h, m, s, mode);
     }
 
     /** 改名（固定标题） */
@@ -900,16 +824,16 @@ public class SdlService extends Service {
     // ---------------- 数据入口 ----------------
 
     /*
-     * 歌曲 / 导航的数据采集已经搬进 SyncCore（与连接解耦）：
-     *   - 通知监听  → SyncCore.musicListener
-     *   - 高德 AIDL → SyncCore.navListener
-     *   - 推送时钟  → SyncCore.pushClock()
+     * 歌曲 / 导航的数据采集已经搬进 SyncPlayCore（与连接解耦）：
+     *   - 通知监听  → SyncPlayCore.musicListener
+     *   - 高德 AIDL → SyncPlayCore.navListener
+     *   - 推送时钟  → SyncPlayCore.pushClock()
      * 服务这边只需要在需要时读 renderer，不再承担数据入口的职责。
      */
 
-    /** 设置导航数据（外部手动调用时用；正常数据流走 SyncCore） */
+    /** 设置导航数据（外部手动调用时用；正常数据流走 SyncPlayCore） */
     public void setNavigation(Navigation nav) {
-        com.xigaigai.syncglance.core.SyncCore.get().setNavigation(nav);
+        com.xigaigai.syncglance.core.SyncPlayCore.get().setNavigation(nav);
     }
 
     /** 手动切换导航模式 */
@@ -1111,6 +1035,10 @@ public class SdlService extends Service {
         // 3. 补发计时器（如果失焦前在跑）
         resendTimerIfNeeded();
 
+        // 3.5 补发「没连车机时设过的」计时器
+        //     （本地状态早已生效、预览也能看到，只差这一条 RPC）
+        com.xigaigai.syncglance.core.SyncPlayCore.get().resendTimerIfPending();
+
         // 4. 画初始界面
         renderer.markDirty("init");
     }
@@ -1278,7 +1206,7 @@ public class SdlService extends Service {
         menusBuilt = false;
         pendingTimerResend = true;
         renderer.onDisconnected();
-        com.xigaigai.syncglance.core.SyncCore.get().detachSender();
+        com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
 
         // 断开瞬间先把通知刷成「未连接（连接关闭）」，随后 stopSelf 会连通知一起收走
         updateNotification();

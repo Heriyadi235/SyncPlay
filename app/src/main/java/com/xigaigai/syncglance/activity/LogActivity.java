@@ -16,7 +16,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.xigaigai.syncglance.R;
-import com.xigaigai.syncglance.core.SyncCore;
+import com.xigaigai.syncglance.core.SyncPlayCore;
 import com.xigaigai.syncglance.display.ScreenPreviewView;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.nav.AmapLinkClient;
@@ -105,7 +105,7 @@ public class LogActivity extends AppCompatActivity {
                 .setTitle("清空歌词缓存")
                 .setMessage("会删除已缓存的歌词（含「无歌词」负缓存），并重新查询当前这首歌。\n不影响设置和其它数据。")
                 .setPositiveButton("清空", (d, w) -> {
-                    int removed = SyncCore.get().clearLyricCache();
+                    int removed = SyncPlayCore.get().clearLyricCache();
                     toast(removed > 0 ? "已清空 " + removed + " 个缓存文件，正在重查歌词"
                                       : "缓存本来就是空的，已重新查询");
                 })
@@ -137,7 +137,7 @@ public class LogActivity extends AppCompatActivity {
      */
     private void refreshPreview() {
         if (previewCtrl == null) return;
-        previewCtrl.render(SyncCore.get().renderer().getLastFrame());
+        previewCtrl.render(SyncPlayCore.get().renderer().getLastFrame());
     }
 
     private String currentText() {
@@ -178,7 +178,7 @@ public class LogActivity extends AppCompatActivity {
          *   只记心跳，不解密。（原来那个「始终解析导航包」开关就是干这个的，现已去掉）
          */
         AmapLinkClient.setPreviewVisible(true);
-        previewCtrl.render(SyncCore.get().renderer().getLastFrame());
+        previewCtrl.render(SyncPlayCore.get().renderer().getLastFrame());
         main.post(ticker);
     }
 
