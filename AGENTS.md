@@ -1,7 +1,7 @@
 # AGENTS.md
 
 > 给在本仓库里工作的 AI / 协作者的行为规则。
-> **以下三条是硬性要求，不因任务紧急或「顺手」而跳过。**
+> **以下四条是硬性要求，不因任务紧急或「顺手」而跳过。**
 
 ---
 
@@ -58,7 +58,33 @@
 
 ---
 
-## 四、项目速览
+## 四、全程用中文思考（**包括内部推理，不只是输出**）
+
+这条说的是**思考语言**，不是「最后用中文回复」。推理、分析、权衡、写代码前的
+构思过程，一律用中文进行；**不要英文想完再翻译成中文**。
+
+| 场景 | 要求 |
+|---|---|
+| 内部推理 / 分析 / 方案构思 | **中文** |
+| 回复用户 | 中文 |
+| 代码注释、提交说明、文档 | 中文 |
+| 变量名、类名、API 名、RPC 字段名 | 保持英文原文（如 `mainField1`、`SetMediaClockTimer`、`OnHMIStatus`） |
+| 引用的报文字段、日志原文 | 原样引用，不要翻译 |
+
+理由：
+
+- 这个项目的所有文档、日志、踩坑记录都是中文的，术语是中文的
+  （"恢复连接""软键""车机""串烧""预览器"）。用英文思考会在这些词上产生偏差，
+  进而写出与既有文档对不上的注释和结论。
+- 很多判断依赖中文语义细节（例如歌名里的「Live」「串烧」「+」、「艳舞台」vs「烈焰红唇」），
+  用英文推理容易漏掉全角括号、`+` 分隔符这类中文语料特有的坑。
+- 用户全程用中文提需求，思考语言一致才能准确对齐意图，而不是先译成英文再转回来。
+
+⚠️ 与「一、改代码前必须先出方案」配合：方案也要用中文讲，不要中英混杂。
+
+---
+
+## 五、项目速览
 
 把 Android 手机变成福特 SYNC 1.1 车机信息面板的 AppLink 应用
 （歌名 / 歌词 / 导航指令 / 计时器）。包名 `com.xigaigai.syncglance`，车机上显示为 SyncPlay。
@@ -78,7 +104,7 @@
 
 ---
 
-## 五、车机能力（**权威来源，优先级高于任何推测/固件逆向笔记**）
+## 六、车机能力（**权威来源，优先级高于任何推测/固件逆向笔记**）
 
 本车机（2012 福克斯 / SYNC 1.1 / MFD4）的实际能力以这两份**实车报文原文**为准：
 
@@ -91,7 +117,7 @@
 > 历史上 `SYNC1.1-AppLink开发总纲.md` / 固件逆向笔记里有多处结论已被实车推翻
 > （如"语言是 EN-GB"、"软键必须用 AddCommand"、"PLAY_PAUSE 可订阅"、"ScrollableMessage 没有 timeout 字段"）。
 
-### 5.1 基本身份
+### 6.1 基本身份
 
 | 项 | 值 |
 |---|---|
@@ -107,7 +133,7 @@
 | `presetBankCapabilities.onScreenPresetsAvailable` | **false**（没有屏上预设库） |
 | `iconResumed` | false |
 
-### 5.2 文本字段（16 个，`width` 是假的）
+### 6.2 文本字段（16 个，`width` 是假的）
 
 全部 `rows=1`、`characterSet=CID1SET`。`width=40` **不代表能显示 40 个字符**——
 实车实测一行只有 **7 个汉字 = 14 半角**（见 README 硬约束）。
@@ -122,7 +148,7 @@ audioPassThruDisplayText1  audioPassThruDisplayText2
 sliderHeader  sliderFooter
 ```
 
-### 5.3 物理按键：**13 个，没有 PLAY_PAUSE**
+### 6.3 物理按键：**13 个，没有 PLAY_PAUSE**
 
 ```
 OK, SEEKLEFT, SEEKRIGHT, PRESET_0 … PRESET_9
@@ -134,7 +160,7 @@ OK, SEEKLEFT, SEEKRIGHT, PRESET_0 … PRESET_9
 - OK 与 PLAY_PAUSE 是同一物理键的说法来自旧笔记，报文里只有 OK；
   现有的别名去重逻辑保留无害，但不要指望收到 `PLAY_PAUSE` 事件。
 
-### 5.4 软键能力
+### 6.4 软键能力
 
 ```
 softButtonCapabilities: 1 条
@@ -147,7 +173,7 @@ softButtonCapabilities: 1 条
 → 软键只能是**纯文本**、只支持**短按**；`Show.softButtons` 的 `softButtonID` 靠
 `OnButtonPress{CUSTOM_BUTTON, customButtonID}` 回调（实车已验证 id=9001）。
 
-### 5.5 可用 RPC：43 个，其余一律不可用
+### 6.5 可用 RPC：43 个，其余一律不可用
 
 **只有 FULL 能用**（掉到 LIMITED 就会失败）：
 
@@ -190,7 +216,7 @@ SendLocation  GetWayPoints  SubscribeWayPoints
 OnKeyboardInput  OnTouchEvent  OnWayPointChange
 ```
 
-### 5.6 参数坑（都踩过）
+### 6.6 参数坑（都踩过）
 
 | RPC | 坑 |
 |---|---|
@@ -201,22 +227,6 @@ OnKeyboardInput  OnTouchEvent  OnWayPointChange
 | `SetGlobalProperties` | `TTSChunk` 必须带 `name` 字段 |
 | `Show` | 覆盖式：不带 `softButtons` 上一次的按钮就消失；`setMediaTrack("")` 才能真正清空 |
 
----
-
-## 六、语言：全程用中文
-
-**思考过程和输出都用中文**，不要用英文推理再翻译。
-
-| 场景 | 要求 |
-|---|---|
-| 内部推理 / 分析 | 中文 |
-| 回复用户 | 中文 |
-| 代码注释、提交说明、文档 | 中文 |
-| 变量名、类名、API 名、RPC 字段名 | 保持英文原文（如 `mainField1`、`SetMediaClockTimer`、`OnHMIStatus`） |
-| 引用的报文字段、日志原文 | 原样引用，不要翻译 |
-
-理由：这个项目的所有文档、日志、踩坑记录都是中文的，
-用英文思考会在术语（"恢复连接""软键""车机"）上产生偏差。
 
 ---
 
