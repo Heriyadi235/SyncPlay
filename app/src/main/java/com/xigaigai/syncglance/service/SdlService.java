@@ -37,7 +37,7 @@ import java.util.Vector;
 /**
  * SyncGlance 的 SDL 服务。
  *
- * <b>迁移分支（migration/sdl5-min）</b>：从 sdl_android 4.12.2 升到 5.8.0。
+ * <b>底座：sdl_android 5.8.0</b>（4.12.2 的旧实现完整保留在 `legacy/sdl4` 分支）。
  * 5.x 已经把 proxy 层（SdlProxyALM / SdlProxyBuilder / IProxyListenerALM）整体移除，
  * 所以连接入口换成 {@link SdlManager} + {@link SdlManagerListener}；
  * RPC 回调改成按 FunctionID 注册的 OnRPCNotificationListener。
@@ -55,24 +55,26 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
     /**
      * 车机上显示的应用名 —— 也是车机策略表里认应用的<b>唯一标识</b>。
      *
-     * ★ 迁移测试版故意改成 <b>SyncPlay5</b>：
-     *   正式版仍叫 SyncPlay，两个版本要能同时装、同时被车机发现，
-     *   同名会撞 DUPLICATE_NAME，后注册的那个会被拒。
-     *   这样一来车机「移动应用」列表里会同时出现 SyncPlay 和 SyncPlay5，方便 A/B 对比。
+     * ★ 一旦定下就永不改：改了等于换了个 App，车机 AppTable 里会多出一条新记录。
      *
-     * 手机桌面的图标名由 AndroidManifest 的 android:label 控制（西改改的Sync5），与这里无关。
+     * 迁移期曾临时叫过 SyncPlay5（为了和 4.12.2 版并存做 A/B 对比）；
+     * 现在 SDL5 转正、旧版退回 legacy/sdl4 分支，名字已改回 SyncPlay。
+     *
+     * 手机桌面的图标名由 AndroidManifest 的 android:label 控制（西改改的Sync），与这里无关。
      */
-    public static final String APP_NAME = "SyncPlay5";
+    public static final String APP_NAME = "SyncPlay";
 
     /** 与 APP_NAME 一致；保留这个常量是因为 Builder 仍要显式传一次 */
-    public static final String SHORT_APP_NAME = "SyncPlay5";
+    public static final String SHORT_APP_NAME = "SyncPlay";
 
     /**
      * 10 位数字 appID（原 SHAID 格式）。
      *
-     * ★ 必须和正式版（1397139052）不同：
-     *   MultiplexTransportConfig 拿它给广播通道去重，
-     *   两个 SDL 应用用同一个值会互相抢通道。
+     * 它<b>不是</b>车机侧的身份（车机认 {@link #APP_NAME}），
+     * 只用于 MultiplexTransportConfig 给广播通道去重。
+     *
+     * 迁移并存期从 1397139052 换成了 1397139053，转正后沿用 1397139053 —— 
+     * 旧版已不在设备上，改回历史值没有收益，反而多一次通道状态变化。
      */
     public static final String APP_ID = "1397139053";
 
@@ -1192,6 +1194,15 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
             public void onStart() {
                 if (gen != generation) return;
                 Log2.i(TAG, "✓ SdlManager onStart —— 已注册完成，等待车机下发 HMI 状态");
+                /*
+                 * ★ 注册一完成就把车机能力清单 dump 出来。
+                 *
+                 *   以前只在「进入 FULL」时 dump（initializeForConnection）。
+                 *   但真正出问题时往往进不到 FULL —— 注册被拒、或者车机一直不给 HMI。
+                 *   那种情况下 App 内日志里一条车机回执都没有，等于瞎猜。
+                 *   放在这里，无论后面能不能到 FULL，车机返回的 RAI 响应都会留在日志里。
+                 */
+                dumpRaiResponse();
             }
 
             @Override

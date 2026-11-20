@@ -9,17 +9,15 @@ android {
     }
 
     defaultConfig {
-        // ★ SDL 5 迁移测试版：包名加 .sdl5 后缀，与正式版（com.xigaigai.syncglance）并存，
-        //   这样同一台手机上可以同时装两个版本做 A/B 对比。
-        //   注意：车机侧靠 appName 认应用，所以 SdlService.APP_NAME 也同步改成了 SyncPlay5，
-        //   否则两个 APK 会撞 DUPLICATE_NAME。
-        applicationId = "com.xigaigai.syncglance.sdl5"
+        // 正式包名。4.12.2 的旧实现完整保留在 legacy/sdl4 分支；
+        // 主线自 2.0 起换用 sdl_android 5.8.0 底座。
+        applicationId = "com.xigaigai.syncglance"
         minSdk = 24
-        // ★ 必须是 32 或更低：sdl_android 4.12.2 内部用 registerReceiver(receiver, filter)
-        //   老 API，targetSdk 33+ 会抛 SecurityException（缺 RECEIVER_NOT_EXPORTED）
+        // ★ 必须是 32 或更低：SDL 库内部用 registerReceiver(receiver, filter)
+        //   老式两参 API，targetSdk 33+ 会抛 SecurityException（缺 RECEIVER_NOT_EXPORTED）
         targetSdk = 32
-        versionCode = 1
-        versionName = "1.1-sdl5"
+        versionCode = 2
+        versionName = "2.0"
     }
 
     buildTypes {

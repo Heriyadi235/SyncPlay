@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 桌面显示名（车机标题栏由 SdlService.APP_NAME 控制） -->
-    <string name="app_name">西改改的Sync5</string>
+    <string name="app_name">西改改的Sync</string>
     <string name="notif_service_label">SyncGlance 通知读取</string>
 </resources>
