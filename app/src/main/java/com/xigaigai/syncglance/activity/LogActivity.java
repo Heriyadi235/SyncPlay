@@ -123,44 +123,13 @@ public class LogActivity extends AppCompatActivity {
     /**
      * 刷新车机屏幕预览。
      *
-     * ★ 不依赖 SdlService 是否存活：渲染器与数据采集都在 SyncCore（应用级），
-     *   所以「没连车机、服务已退出」时预览照样能显示手机上的歌曲/导航。
-     *   这是把预览器从连接层解耦后的直接收益。
+     * 预览器只吃「一帧」——由 StateRenderer 算出「如果现在发会发什么」。
+     * 它不依赖 SdlService 是否存活，也不关心歌词怎么切、数据从哪来；
+     * 计时器那一格由预览器自己按 ClockInstruction 走表。
      */
     private void refreshPreview() {
         if (previewCtrl == null) return;
-
-        SyncCore core = SyncCore.get();
-        StateRenderer r = core.renderer();
-
-        // ★ 只更新播放位置，不改歌曲身份
-        //   （整首替换会绕过 SyncCore 的换歌逻辑，导致歌词永远加载不到）
-        NotificationCatcher nc = NotificationCatcher.getInstance();
-        if (nc != null) {
-            com.xigaigai.syncglance.model.NowPlaying latest = nc.pollNowPlaying();
-            if (latest != null) {
-                r.updatePlaybackPosition(latest.positionMs, latest.playing);
-            }
-        }
-
-        // 标题栏显示的「已连接 / 未连接」看的是 HMI 等级，不是发送通道在不在
-        boolean connected = core.lifecycle().canSendRpc();
-
-        previewCtrl.update(
-                r.currentState(),
-                r.getSong(),
-                core.lyrics(),
-                r.getNavigation(),
-                r.isTimerRunning(),
-                connected,
-                r.getTimerStartMillis(),
-                r.getTimerStartHours(),
-                r.getTimerStartMinutes(),
-                r.getTimerStartSeconds(),
-                r.isTimerCountdown(),
-                r.getSoftKeyTexts().toArray(new String[0]),
-                r.getTrackKind(),
-                r.isTimerActive());
+        previewCtrl.render(SyncCore.get().renderer().getLastFrame());
     }
 
     private String currentText() {

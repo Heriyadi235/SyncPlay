@@ -156,6 +156,15 @@ public class StateRenderer {
 
             // ★ 生命周期检查：非 FULL 一律不发送
             if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) {
+                /*
+                 * ★ 即使不能发，也要把「意图帧」算出来。
+                 *
+                 *   预览器吃的是 lastFrame；如果这里直接 return，
+                 *   没连车机时 lastFrame 永远是初始空帧，预览就是一片空白。
+                 *   这也正是文档 §8.14 的老坑（预览不能依赖"真正发出去过"）。
+                 */
+                refreshFrameOnly();
+
                 if (!warnedNotFull) {
                     warnedNotFull = true;
                     Log2.i(TAG, "暂不刷新（" +
@@ -386,159 +395,76 @@ public class StateRenderer {
 
     // ---------------- 真正发 Show ----------------
 
+    /**
+     * 最近一帧「如果现在发会发什么」—— 预览器从这里取。
+     *
+     * ★ 即使没连车机（sender == null）、甚至 Show 根本发不出去，
+     *   这一帧也会被算出来并更新，预览不会卡在上一次真正发送的快照上
+     *   （这就是文档 §8.14 反复踩的那个坑）。
+     */
+    private volatile ScreenFrame lastFrame = new ScreenFrame();
+
+    /** 预览用：取最近一帧 */
+    public ScreenFrame getLastFrame() { return lastFrame; }
+
+    /**
+     * 只更新预览帧，不发任何 RPC。
+     * 用于「当前等级不能发 Show」的时候（未连车机 / 非 HMI_FULL）。
+     */
+    private void refreshFrameOnly() {
+        ScreenFrame frame = buildFrame();
+        lastFrame = frame;
+        trackPage1 = frame.mediaTrack;
+        trackPage2 = frame.mediaTrack;
+    }
+
+    /** 上一次用于预览的计时器指令（用来沿用 issuedAtMs，避免每次都把走表起点重置） */
+    private volatile ClockInstruction lastClock = ClockInstruction.none();
+
     private void doShow() {
+        // ① 先把「这一帧是什么」算出来 —— 无论能不能发
+        ScreenFrame frame = buildFrame();
+        lastFrame = frame;
+        trackPage1 = frame.mediaTrack;
+        trackPage2 = frame.mediaTrack;
+
         if (sender == null) {
             dirty = true;
             return;
         }
 
-        State st = currentState();
-        String f1, f2, f3, f4, track, track2;
-        // 第3行右侧计时器要显示的时间（ETA 时刻）
-        String clock = null;
-
-        switch (st) {
-            case A_EMPTY:
-                f1 = greeting();
-                f2 = "西改改";
-                f3 = "";
-                f4 = "";
-                track = "";
-                track2 = "";
-                break;
-
-            case B_NAV_ONLY:
-                // 第1屏：转向+距离 / 路名
-                f1 = nz(nav.instruction);
-                f2 = nz(nav.road);
-                // 第2屏：ETA文字 / 剩余距离
-                f3 = nz(nav.etaText());
-                f4 = nz(nav.remainDistance);
-                // mediaTrack：剩余距离（"2.4 km"）
-                track = nz(nav.remainDistance);
-                track2 = track;
-                // 计时器：ETA 时刻
-                clock = nav.etaClock();
-                break;
-
-            case C_MUSIC_ONLY: {
-                // 第1屏：歌名 + 歌手
-                f1 = nz(song.title);
-                f2 = nz(song.artist);
-
-                // 第2屏：两行全给歌词；没歌词时第一行提示
-                if (lyrics != null && !lyrics.isEmpty()) {
-                    String[] fl = lyricLines(song.positionMs);
-                    f3 = fl[0];
-                    f4 = fl[1];
-                } else {
-                    f3 = "无歌词信息";
-                    f4 = "";
-                }
-                // mediaTrack：只显示歌名
-                track = nz(song.title);
-                track2 = track;
-                // 计时器：播放进度（由 songClockRpc 用 COUNTUP 起表）
-                clock = null;
-                break;
-            }
-
-            case D_BOTH:
-            default: {
-                // 第1屏：导航指令 / 路名
-                f1 = nz(nav.instruction);
-                f2 = nz(nav.road);
-
-                // 第2屏：两行全给歌词；没歌词时第一行提示
-                if (lyrics != null && !lyrics.isEmpty()) {
-                    String[] fl = lyricLines(song.positionMs);
-                    f3 = fl[0];
-                    f4 = fl[1];
-                } else {
-                    f3 = "无歌词信息";
-                    f4 = "";
-                }
-                // mediaTrack：始终显示导航剩余距离
-                track = nz(nav.remainDistance);
-                track2 = track;
-                // 计时器：ETA 时刻
-                clock = nav.etaClock();
-                break;
-            }
-        }
-
-        // 用户计时器存在（走秒中或已暂停）→ 一切让位
-        if (timerActive) clock = null;
-        // ETA 变了就立刻反映到车机时钟上（不走 60 秒缓存）
-        navClockText = nav != null && nav.hasData() ? nav.etaClockNow() : null;
-        if (navClockText != null) clock = navClockText;
-
-        // ★ 所有要发出去的字符串统一做假名转罗马音（按词切分、送假名不空格，
-        //   规则见 Romaji / docs/design.md「显示文本转写规范」）
-        f1 = Romaji.convert(f1);
-        f2 = Romaji.convert(f2);
-        f3 = Romaji.convert(f3);
-        f4 = Romaji.convert(f4);
-        track = Romaji.convert(track);
-        track2 = Romaji.convert(track2);
-
-        // ★ track 行前面加状态指示符
-        //   规则看「这一行装的是什么」，不看 ABCD；
-        //   且 track 本身为空时一律不加（欢迎页不该出现孤立符号）。
-        track  = statusPrefix(track)  + track;
-        track2 = statusPrefix(track2) + track2;
-
-        // 第 1 屏和第 2 屏的 track 可能不同，记录第二屏的值供预览用
-        this.trackPage1 = track;
-        this.trackPage2 = track2;
-
-        String payload = st + "|" + f1 + "|" + f2 + "|" + f3 + "|" + f4 + "|" + track + "|" + track2
-                + "|sb=" + playingNow() + "x" + softKeyCount;
+        // ② 内容没变就不重发
+        String payload = frame.stamp();
         if (payload.equals(lastPayload)) {
             dirty = false;
             return;
         }
 
         Show s = new Show();
-        if (f1 != null) s.setMainField1(f1);
-        if (f2 != null) s.setMainField2(f2);
-        if (f3 != null) s.setMainField3(f3);
-        if (f4 != null) s.setMainField4(f4);
-        // mediaTrack 两屏共用，所以发第 1 屏的值。
+        s.setMainField1(frame.f1);
+        s.setMainField2(frame.f2);
+        s.setMainField3(frame.f3);
+        s.setMainField4(frame.f4);
+        // mediaTrack 两屏共用，所以发同一个值。
         //
         // ★ 注意：用 setMediaTrack("") 才能真正清空。
         //   如果这里跳过不设，车机会保留上一次的值 ——
-        //   降级回欢迎页时就会残留「▶歌名」这种东西。
-        s.setMediaTrack(track == null ? "" : track);
+        //   降级回欢迎页时就会残留「歌名」这种东西。
+        s.setMediaTrack(frame.mediaTrack == null ? "" : frame.mediaTrack);
         s.setAlignment(TextAlignment.LEFT_ALIGNED);
 
         // ★ 软键：第 1 格固定播放/暂停，后面按测试模式追加。
-        //
-        //   车机底栏共 4 格，最后一格「更多…」是车机自带的，
-        //   点进去就是 AddCommand / AddSubMenu 建的那套菜单。
-        //   我们能占的是前面几格 —— 本车 softButtonCapabilities 只声明 1 项，
-        //   实际能画几个要靠软键测试按钮去试。
+        //   车机底栏共 4 格，最后一格「更多…」是车机自带的。
         try {
             java.util.List<SoftButton> keys = new java.util.ArrayList<>();
-
-            String label = getSoftKey1();
-            SoftButton b1 = new SoftButton();
-            b1.setType(SoftButtonType.SBT_TEXT);
-            b1.setText(label);
-            b1.setSoftButtonID(SOFT_BUTTON_ID);
-            b1.setSystemAction(SystemAction.DEFAULT_ACTION);
-            keys.add(b1);
-
-            int n = softKeyCount;
-            for (int i = 2; i <= n; i++) {
+            for (int i = 0; i < frame.softKeys.length; i++) {
                 SoftButton b = new SoftButton();
                 b.setType(SoftButtonType.SBT_TEXT);
-                b.setText("\u952e" + i);            // 「键2」「键3」…
-                b.setSoftButtonID(SOFT_BUTTON_ID + (i - 1));
+                b.setText(frame.softKeys[i]);
+                b.setSoftButtonID(SOFT_BUTTON_ID + i);
                 b.setSystemAction(SystemAction.DEFAULT_ACTION);
                 keys.add(b);
             }
-
             s.setSoftButtons(keys);
         } catch (Exception e) {
             Log2.w(TAG, "构造软键失败: " + e.getMessage());
@@ -549,13 +475,208 @@ public class StateRenderer {
             lastShowAt = System.currentTimeMillis();
             lastPayload = payload;
             dirty = false;
-            Log2.i(TAG, "Show[" + st + "] " + f1 + " / " + f2 + " / " + f3 + " / " + f4
-                    + (track == null ? "" : " / T=" + track));
+            Log2.i(TAG, "Show[" + frame.stateLabel + "] " + frame.f1 + " / " + frame.f2
+                    + " / " + frame.f3 + " / " + frame.f4
+                    + (frame.mediaTrack.isEmpty() ? "" : " / T=" + frame.mediaTrack));
         } catch (Exception e) {
             Log2.e(TAG, "Show 失败", e);
             dirty = true;
         }
     }
+
+    /**
+     * 计算当前这一帧。只读状态，不发任何 RPC。
+     *
+     * 这里集中了「屏幕上每个位置放什么」的唯一实现：
+     * 四状态决策、歌词分行、track 前缀、假名转写、底栏软键。
+     * 实车发送与屏幕预览都消费同一个结果，所以不可能不一致。
+     */
+    private ScreenFrame buildFrame() {
+        ScreenFrame f = new ScreenFrame();
+        State st = currentState();
+        f.stateLabel = stateLabel(st);
+        f.connected = lifecycle != null && lifecycle.canSendRpc();
+        f.title = f.connected ? "SyncPlay" : "SyncPlay (未连接)";
+
+        switch (st) {
+            case A_EMPTY:
+                f.f1 = greeting();
+                f.f2 = "西改改";
+                f.f3 = "";
+                f.f4 = "";
+                f.mediaTrack = "";
+                break;
+
+            case B_NAV_ONLY:
+                // 第 1 屏：转向+距离 / 路名
+                f.f1 = nz(nav.instruction);
+                f.f2 = nz(nav.road);
+                // 第 2 屏：ETA 文字 / 剩余距离
+                f.f3 = nz(nav.etaText());
+                f.f4 = nz(nav.remainDistance);
+                // mediaTrack：剩余距离
+                f.mediaTrack = nz(nav.remainDistance);
+                break;
+
+            case C_MUSIC_ONLY: {
+                // 第 1 屏：歌名 + 歌手
+                f.f1 = nz(song.title);
+                f.f2 = nz(song.artist);
+
+                // 第 2 屏：两行全给歌词；没歌词时第一行提示
+                if (lyrics != null && !lyrics.isEmpty()) {
+                    String[] fl = lyricLines(song.positionMs);
+                    f.f3 = fl[0];
+                    f.f4 = fl[1];
+                } else {
+                    f.f3 = "无歌词信息";
+                    f.f4 = "";
+                }
+                // mediaTrack：只有 8 字符宽（4 汉字），放「最干净的歌名」
+                f.mediaTrack = nz(trackTitle(song.title));
+                break;
+            }
+
+            case D_BOTH:
+            default: {
+                // 第 1 屏：导航指令 / 路名
+                f.f1 = nz(nav.instruction);
+                f.f2 = nz(nav.road);
+
+                // 第 2 屏：两行全给歌词；没歌词时第一行提示
+                if (lyrics != null && !lyrics.isEmpty()) {
+                    String[] fl = lyricLines(song.positionMs);
+                    f.f3 = fl[0];
+                    f.f4 = fl[1];
+                } else {
+                    f.f3 = "无歌词信息";
+                    f.f4 = "";
+                }
+                // mediaTrack：始终显示导航剩余距离（导航优先）
+                f.mediaTrack = nz(nav.remainDistance);
+                break;
+            }
+        }
+
+        // ETA 时刻每帧重算（不走 60 秒缓存），供时钟指令与预览使用
+        navClockText = nav != null && nav.hasData() ? nav.etaClockNow() : null;
+
+        // ★ 所有要发出去的字符串统一做日文转写（规则见 Romaji / docs/design.md）
+        f.f1 = Romaji.convert(f.f1);
+        f.f2 = Romaji.convert(f.f2);
+        f.f3 = Romaji.convert(f.f3);
+        f.f4 = Romaji.convert(f.f4);
+        f.mediaTrack = Romaji.convert(f.mediaTrack);
+
+        // ★ track 行前面加状态指示符（看「这一行装的是什么」，track 为空时不加）
+        f.mediaTrack = statusPrefix(f.mediaTrack) + f.mediaTrack;
+
+        // ★ 第 3 行右侧：计时器「指令」，不是算好的读数
+        f.clock = currentClockInstruction();
+
+        // ★ 底栏软键（第 1 格播放/暂停，其余是测试键）
+        java.util.List<String> keys = getSoftKeyTexts();
+        f.softKeys = keys.toArray(new String[0]);
+
+        return f;
+    }
+
+    private static String stateLabel(State st) {
+        switch (st) {
+            case A_EMPTY: return "空闲";
+            case B_NAV_ONLY: return "仅导航";
+            case C_MUSIC_ONLY: return "仅歌曲";
+            case D_BOTH:
+            default: return "导航+歌曲";
+        }
+    }
+
+    /**
+     * mediaTrack 只显示歌名，且那一格只有 <b>8 个字符（4 个汉字）</b>宽。
+     *
+     * 所以显示「最干净的歌名」—— 就是查询歌词时送给 lrclib 的那个名字：
+     * 剥掉译名 / 出处这类括号（A 类），保留 Live / Remix / 伴奏这类版本标签（B 类）。
+     * 规则见 {@link com.xigaigai.syncglance.lyric.TitleNorm#queryTitle}。
+     */
+    private static String trackTitle(String title) {
+        if (title == null || title.trim().isEmpty()) return "";
+        return com.xigaigai.syncglance.lyric.TitleNorm.queryTitle(title);
+    }
+
+    /**
+     * 当前应该发给车机的计时器指令。
+     *
+     * ★ 这不是「算好的读数」：SYNC 的计时器是 App 下指令、车机自己走表。
+     *   预览器拿这条指令自己模拟走表，因此它与
+     *   「Show 节流（1 秒）」「歌词选句（时间轴）」是三条独立的时间线。
+     *
+     * 优先级与实车一致：用户计时器 &gt; 导航 ETA &gt; 播放进度。
+     */
+    private ClockInstruction currentClockInstruction() {
+        long now = System.currentTimeMillis();
+
+        // ① 用户计时器（走秒或暂停都占着那一格）
+        if (timerActive) {
+            if (timerRunning) {
+                ClockInstruction.Mode mode = timerCountdown
+                        ? ClockInstruction.Mode.COUNTDOWN : ClockInstruction.Mode.COUNTUP;
+                // 起始值固定，靠 anchor（真实开始时刻）推着走
+                return reuseClock(mode, timerH, timerM, timerS, timerStartMillis);
+            }
+            // 暂停：定格在暂停那一刻的读数
+            long sec = timerElapsedSeconds();
+            int h = (int) (sec / 3600);
+            int m = (int) ((sec / 60) % 60);
+            int s = (int) (sec % 60);
+            return reuseClock(ClockInstruction.Mode.PAUSE, h, m, s, now);
+        }
+
+        // ② 导航 ETA：借 mm:ss 位显示到达时刻（hh 塞进分钟位）
+        String eta = navClockText;
+        if (eta != null && eta.indexOf(':') > 0) {
+            try {
+                int c = eta.indexOf(':');
+                int hh = Integer.parseInt(eta.substring(0, c));
+                int mm = Integer.parseInt(eta.substring(c + 1));
+                return reuseClock(ClockInstruction.Mode.PAUSE, 0, hh, mm, now);
+            } catch (Exception ignored) { }
+        }
+
+        // ③ 播放进度：从当前位置起表，车机自己走
+        if (song != null && song.hasData() && song.playing && song.positionMs > 0) {
+            long pos = song.positionMs;
+            int m = (int) ((pos / 60_000) % 60);
+            int s = (int) ((pos / 1000) % 60);
+            return reuseClock(ClockInstruction.Mode.COUNTUP, 0, m, s, now);
+        }
+
+        /*
+         * ④ 没有任何新指令时：**沿用上一条还在走的指令**。
+         *
+         *   车机那一格不会因为歌曲暂停而清空 —— 它只会按最后一条指令继续走，
+         *   直到我们显式发 CLEAR。预览器照同样的规则处理，才不会出现
+         *   「暂停后那一格突然空了」的假象。
+         */
+        ClockInstruction last = lastClock;
+        if (last != null && last.isRunning()) return last;
+
+        return ClockInstruction.none();
+    }
+
+    /**
+     * 同一条指令就沿用原来的 issuedAtMs —— 否则每次重建帧都会把走表起点重置到 0，
+     * 预览里的秒数就不动了。
+     */
+    private ClockInstruction reuseClock(ClockInstruction.Mode mode, int h, int m, int s, long anchor) {
+        ClockInstruction last = lastClock;
+        if (last != null && last.mode == mode && last.h == h && last.m == m && last.s == s) {
+            return last;
+        }
+        ClockInstruction c = ClockInstruction.of(mode, h, m, s, anchor);
+        lastClock = c;
+        return c;
+    }
+
 
     /** 第 1 屏和第 2 屏的 track 值（可能不同，预览要用） */
     private volatile String trackPage1 = "";
