@@ -1239,29 +1239,33 @@ public class SdlService extends Service {
     /**
      * 连接结束时的本地收尾（等价于 4.x 的 onProxyClosed）。
      *
-     * ★ <b>不再 stopSelf()</b> —— 这里和官方 hello_sdl 的做法**有意不同**。
+     * ★ <b>完全照官方 hello_sdl 的做法：收尾之后把 Service 停掉</b>（`stopSelf`）。
      *
-     *   官方是"收尾之后退出，等广播链路重新拉起"。但我们需要一条**常驻通知**
-     *   显示车机连接状态，所以本 Service 必须一直活着：
+     *   用户原则（`AGENTS.md` §1.1）：**连接生命周期控制始终保持与 SDL 官方一致，
+     *   没必要自己乱改，除非发现了难以解决的兼容性问题。**
      *
-     *   - 前台通知跟着 Service 一起常驻（未连接时显示「未连接 · 等待车机」）
-     *   - 进程不被系统回收，下次上车 ACL_CONNECTED 广播打过来时，
-     *     {@link #onStartCommand} 里的 {@link #needRebuild()} 会直接重建 SdlManager，
-     *     比"冷启动 → 重新建 RouterService → 再注册"快得多
+     *   官方没有应用层重试 —— 重连靠 SDL 官方链路：
+     *     车机重连 → ACL_CONNECTED → SdlReceiver/SyncRouterService 起路由
+     *     → sdl.router.startservice / onSdlEnabled → 系统重新拉起本 Service → 重建 SdlManager
      *
-     *   仍然**没有应用层定时重试** —— 重连依旧只靠 SDL 官方链路
-     *   （车机重连 → ACL_CONNECTED → SdlReceiver/SyncRouterService → 系统拉起本 Service）。
-     *   之前写过的「每 5 秒重建 ×12 次」会让车机侧反复收到同一个 appName 的注册请求、
-     *   卡在「恢复连接」，不要再加回来。
+     *   所以前台通知只在**本 Service 存活期间**存在（正常就是车机连接期间）。
+     *   断开后通知会跟着消失 —— 这是官方语义的必然结果，不是 bug。
+     *
+     *   千万不要加「每 5 秒重建、最多 12 次」这类应用层重试：会让车机侧
+     *   反复看到同一个 appName 的注册请求，卡在「恢复连接」不动（踩过）。
+     *   也不要不 stopSelf 来硬撑常驻通知（试过，为了常驻通知而偏离官方语义，
+     *   最终按用户要求改回来了）。
      */
     private void handleConnectionClosed() {
-        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），保留前台服务，等广播链路重连");
+        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），按官方语义停掉 Service");
         /*
          * 「连接关闭」只在**真的跟车机对上过话**之后才成立。
          *
          * 停在 CONNECTING 就断的，说明 SdlManager 建好了但车机一条 OnHMIStatus 都没回
-         * （RouterService 没跑 / 车机没选中），这时报「未连接（连接关闭）」会误导 ——
-         * 让人以为刚才连通过。这种情况应该报「等待车机」。
+         * （RouterService 没跑 / 车机没选中），这时报「未连接（连接关闭）」会误导。
+         *
+         * 注意：本方法末尾就 stopSelf 了，所以这个状态实际上几乎看不到；
+         * 留着是为了「服务因为别的原因仍活着」的情况下语义正确。
          */
         SyncLifecycle.State beforeClose = lifecycle.getState();
         closedOnce = beforeClose != SyncLifecycle.State.CONNECTING
@@ -1276,7 +1280,8 @@ public class SdlService extends Service {
         renderer.onDisconnected();
         com.xigaigai.syncglance.core.SyncCore.get().detachSender();
 
-        // 通知改成「未连接 · 等待车机」，并继续保持前台（不 stopSelf）
+        // 断开瞬间先把通知刷成「未连接（连接关闭）」，随后 stopSelf 会连通知一起收走
         updateNotification();
+        stopSelf();          // ★ 官方语义：断开就退出，等广播链路重新拉起
     }
 }
