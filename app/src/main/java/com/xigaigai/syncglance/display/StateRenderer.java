@@ -519,16 +519,28 @@ public class StateRenderer {
                 break;
 
             case C_MUSIC_ONLY: {
-                // 第 1 屏：歌名 + 歌手
-                f.f1 = nz(song.title);
-                f.f2 = nz(song.artist);
-
-                // 第 2 屏：两行全给歌词；没歌词时第一行提示
+                /*
+                 * ★ 车机会在第 2 屏停留一会儿后自己跳回第 1 屏（实车行为，见 AGENTS.md 6.7）。
+                 *
+                 *   所以第 1 屏放「必须一直看」的歌词，歌名/歌手退到第 2 屏；
+                 *   反过来做的话，歌词刚出来就被跳走，屏幕上只剩歌名歌手。
+                 *
+                 *   没歌词时没有"要一直看"的东西，就保持歌名歌手在第 1 屏、
+                 *   第 3 行给一句提示。
+                 */
                 if (lyrics != null && !lyrics.isEmpty()) {
+                    // 第 1 屏：两行全给歌词
                     String[] fl = lyricLines(song.positionMs);
-                    f.f3 = fl[0];
-                    f.f4 = fl[1];
+                    f.f1 = fl[0];
+                    f.f2 = fl[1];
+                    // 第 2 屏：歌名 + 歌手
+                    f.f3 = nz(song.title);
+                    f.f4 = nz(song.artist);
                 } else {
+                    // 第 1 屏：歌名 + 歌手
+                    f.f1 = nz(song.title);
+                    f.f2 = nz(song.artist);
+                    // 第 2 屏：提示
                     f.f3 = "无歌词信息";
                     f.f4 = "";
                 }

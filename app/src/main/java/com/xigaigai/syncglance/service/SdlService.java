@@ -1186,16 +1186,23 @@ public class SdlService extends Service {
     /**
      * 连接结束时的本地收尾（等价于 4.x 的 onProxyClosed）。
      *
-     * ★ 完全照官方 hello_sdl 的做法：**收尾之后把 Service 停掉**（stopSelf）。
-     *   官方没有应用层重试 —— 重连靠 SDL 官方链路：
-     *     车机重连 → ACL_CONNECTED → SdlReceiver/SyncRouterService 起路由
-     *     → sdl.router.startservice / onSdlEnabled → 系统重新拉起本 Service → 重建 SdlManager
+     * ★ <b>不再 stopSelf()</b> —— 这里和官方 hello_sdl 的做法**有意不同**。
      *
-     *   之前我们自己写了「每 5 秒重建、最多 12 次」的重试，反而会让车机侧
-     *   反复看到同一个 appName 的注册请求，卡在「恢复连接」不动。
+     *   官方是"收尾之后退出，等广播链路重新拉起"。但我们需要一条**常驻通知**
+     *   显示车机连接状态，所以本 Service 必须一直活着：
+     *
+     *   - 前台通知跟着 Service 一起常驻（未连接时显示「未连接 · 等待车机」）
+     *   - 进程不被系统回收，下次上车 ACL_CONNECTED 广播打过来时，
+     *     {@link #onStartCommand} 里的 {@link #needRebuild()} 会直接重建 SdlManager，
+     *     比"冷启动 → 重新建 RouterService → 再注册"快得多
+     *
+     *   仍然**没有应用层定时重试** —— 重连依旧只靠 SDL 官方链路
+     *   （车机重连 → ACL_CONNECTED → SdlReceiver/SyncRouterService → 系统拉起本 Service）。
+     *   之前写过的「每 5 秒重建 ×12 次」会让车机侧反复收到同一个 appName 的注册请求、
+     *   卡在「恢复连接」，不要再加回来。
      */
     private void handleConnectionClosed() {
-        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），按官方语义停掉 Service");
+        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），保留前台服务，等广播链路重连");
         sdlManager = null;
         lifecycle.onProxyClosed();
         // 断开了，导航数据不用解码了（省 CPU）
@@ -1206,7 +1213,7 @@ public class SdlService extends Service {
         renderer.onDisconnected();
         com.xigaigai.syncglance.core.SyncCore.get().detachSender();
 
+        // 通知改成「未连接 · 等待车机」，并继续保持前台（不 stopSelf）
         updateNotification();
-        stopSelf();          // ★ 与官方一致：断开就退出，等广播链路重新拉起
     }
 }
