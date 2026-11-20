@@ -14,9 +14,10 @@ import com.smartdevicelink.proxy.rpc.enums.SystemAction;
 import com.smartdevicelink.proxy.rpc.enums.TextAlignment;
 import com.smartdevicelink.proxy.rpc.enums.UpdateMode;
 import com.xigaigai.syncglance.lyric.Lrc;
+import com.xigaigai.syncglance.lyric.Romaji;
+import com.xigaigai.syncglance.lyric.SyncLyric;
 import com.xigaigai.syncglance.model.Navigation;
 import com.xigaigai.syncglance.model.NowPlaying;
-import com.xigaigai.syncglance.util.Kana;
 import com.xigaigai.syncglance.util.Log2;
 
 import java.util.List;
@@ -472,13 +473,14 @@ public class StateRenderer {
         navClockText = nav != null && nav.hasData() ? nav.etaClockNow() : null;
         if (navClockText != null) clock = navClockText;
 
-        // ★ 所有要发出去的字符串统一做假名转罗马音（每个假名之间加空格便于阅读）
-        f1 = Kana.romajiSpaced(f1);
-        f2 = Kana.romajiSpaced(f2);
-        f3 = Kana.romajiSpaced(f3);
-        f4 = Kana.romajiSpaced(f4);
-        track = Kana.romajiSpaced(track);
-        track2 = Kana.romajiSpaced(track2);
+        // ★ 所有要发出去的字符串统一做假名转罗马音（按词切分、送假名不空格，
+        //   规则见 Romaji / docs/design.md「显示文本转写规范」）
+        f1 = Romaji.convert(f1);
+        f2 = Romaji.convert(f2);
+        f3 = Romaji.convert(f3);
+        f4 = Romaji.convert(f4);
+        track = Romaji.convert(track);
+        track2 = Romaji.convert(track2);
 
         // ★ track 行前面加状态指示符
         //   规则看「这一行装的是什么」，不看 ABCD；
@@ -957,10 +959,14 @@ public class StateRenderer {
      *
      * 车机一行 7 汉字是实车照片测出来的；英文字母占半格，
      * 所以统一换算成半角单位来算，中文和德语都能正确处理。
+     *
+     * ★ 真正的值定义在 {@link SyncLyric#LINE_UNITS}，这里只是别名：
+     *   sync 缓存的文件名与签名里也写着这两个数，必须只有一个来源，
+     *   否则改了这边、旧缓存还能命中，显示就会错位。
      */
-    private static final int LYRIC_LINE_UNITS = 14;
+    private static final int LYRIC_LINE_UNITS = SyncLyric.LINE_UNITS;
     /** 一屏给歌词几行 */
-    private static final int LYRIC_PAGES = 2;
+    private static final int LYRIC_PAGES = SyncLyric.PAGES;
 
     /**
      * 算出此刻两行歌词该显示什么。<b>实例方法</b>，用当前持有的歌词。
@@ -972,10 +978,12 @@ public class StateRenderer {
     /**
      * 歌词分行<b>唯一实现</b>，实车与预览共用。
      *
-     * 规则：
-     *   ① 一句宽度 ≤ 一行（14 半角）→ 占第一行，第二行留空
-     *   ② 一句宽度 ≤ 一屏（28 半角）→ 折成两行
-     *   ③ 超过一屏 → 由 {@link Lrc#paged} 按时间切成多段轮流显示（翻页）
+     * 两条路径：
+     *   ① <b>成品歌词</b>（{@link SyncLyric} 预生成的 sync 缓存）：
+     *      每行已经是一屏两行（U+0001 分隔），这里只做「按时间取行 + 拆两行」，
+     *      不再分词、不再转写、不再翻页 —— 这是省算力的关键。
+     *   ② 没有成品缓存（首次播放 / 生成失败）：现场走旧路径
+     *      {@link Lrc#paged} → 转写 → 折行。
      *
      * @param positionMs 原始播放位置，内部会自动加 {@link #LYRIC_LEAD_MS}
      */
@@ -983,20 +991,24 @@ public class StateRenderer {
         String[] out = new String[]{"", ""};
         if (lyrics == null || lyrics.isEmpty()) return out;
 
-        // 先做假名转换再分行，否则分行按假名算、显示却是罗马音，长度对不上
-        String[] page = Lrc.paged(lyrics, positionMs + LYRIC_LEAD_MS,
-                LYRIC_LINE_UNITS, LYRIC_PAGES);
-        String cur = Kana.romajiSpaced(nz(page[0])).trim();
-        if (cur.isEmpty()) return out;
+        long pos = positionMs + LYRIC_LEAD_MS;
 
-        int width = Lrc.widthOf(cur);
-        if (width <= LYRIC_LINE_UNITS) {
-            out[0] = cur;                 // 一行放下，第二行留空
+        // ① 成品歌词：直接拆屏
+        String[] ready = SyncLyric.pageAt(lyrics, pos);
+        if (ready != null) {
+            out[0] = ready[0];
+            out[1] = ready[1];
             return out;
         }
-        // 一行放不下 → 对半折成两行（尽量在空格处断）
-        out[0] = splitAt(cur, width / 2);
-        out[1] = cur.substring(out[0].length()).trim();
+
+        // ② 降级路径：先转写再分行，否则分行按假名算、显示却是罗马音，长度对不上
+        String[] page = Lrc.paged(lyrics, pos, LYRIC_LINE_UNITS, LYRIC_PAGES);
+        String cur = Romaji.convert(nz(page[0])).trim();
+        if (cur.isEmpty()) return out;
+
+        String[] two = SyncLyric.splitTwo(cur);
+        out[0] = two[0];
+        out[1] = two[1];
         return out;
     }
 
@@ -1013,49 +1025,6 @@ public class StateRenderer {
         // 全是英文的情况按字符数算
         if (count == 0) return s.length();
         return count;
-    }
-
-    /**
-     * 在「半角宽度 n」附近切开，返回前半段。
-     *
-     * 宽度口径与 {@link Lrc#widthOf} 一致：汉字 2、ASCII 1。
-     *
-     * 两条规则：
-     *   ① 优先从空格处断开 —— 罗马音（`shi a wa se na`）和德语歌词
-     *      从词中间切会很难读，所以在目标位置前后 3 个字符内找最近的空格
-     *   ② 找不到空格才硬切
-     *
-     * 历史 bug：早期版本按「第 n 个汉字」找位置，
-     * 纯英文/德语歌词里一个汉字都没有，于是直接返回整串，
-     * 第二行永远是空的（歌词看着完全没换行）。
-     */
-    private static String splitAt(String s, int n) {
-        if (s == null || s.isEmpty()) return "";
-        if (n <= 0) return "";
-
-        // 先按半角宽度找到切点下标
-        int w = 0;
-        int target = -1;
-        for (int i = 0; i < s.length(); i++) {
-            int cw = isWideChar(s.charAt(i)) ? 2 : 1;
-            if (w + cw > n) { target = i; break; }
-            w += cw;
-        }
-        if (target < 0) return s;              // n 超过整串宽度，不用切
-        if (target == 0) target = 1;           // 至少切一个字符，避免死循环
-
-        // 在 target 前后找最近的空格（窗口 ±3）
-        int best = -1;
-        for (int d = 0; d <= 3; d++) {
-            int right = target + d;
-            if (right < s.length() && s.charAt(right) == ' ') { best = right; break; }
-            int left = target - d;
-            if (left > 0 && s.charAt(left) == ' ') { best = left; break; }
-        }
-        if (best > 0 && best < s.length()) {
-            return s.substring(0, best);
-        }
-        return s.substring(0, target);
     }
 
     private static boolean isWideChar(char c) {

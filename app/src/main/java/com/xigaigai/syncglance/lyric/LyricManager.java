@@ -63,6 +63,11 @@ public class LyricManager {
 
     private List<Lrc.Line> current;
     private String currentKey;
+    /**
+     * 请求序号。每换一次歌自增，回调前比对：不一致就说明结果已经过期
+     * （典型场景：A→B→A 快速切歌，A 的旧网络结果迟到，绝不能覆盖当前显示）。
+     */
+    private volatile int loadSeq;
 
     public LyricManager(File cacheDir) {
         this.cacheDir = cacheDir;
@@ -74,6 +79,10 @@ public class LyricManager {
 
     /**
      * 为一首歌请求歌词。已有缓存则同步回调，否则后台网络查询。
+     *
+     * 缓存层次（详见 docs/development.md 4.5.4）：
+     *   ① 内存 → ② 成品缓存（.sync.lrc，转写+折行+翻页都做完）
+     *   → ②' 原始磁盘缓存（.lrc）→ ②.5 负缓存（.none）→ ③ 网络
      */
     public void load(NowPlaying song, Callback cb) {
         if (song == null || !song.hasData()) {
@@ -83,20 +92,32 @@ public class LyricManager {
             return;
         }
 
+        final int seq = ++loadSeq;
         final String key = cacheKey(song);
         if (key.equals(currentKey) && current != null) {
             if (cb != null) cb.onLyrics(song, current);
             return;
         }
 
-        // ② 磁盘缓存
-        File f = new File(cacheDir, key + ".lrc");
-        if (f.exists()) {
+        final File rawFile = new File(cacheDir, key + ".lrc");
+        final File syncFile = SyncLyric.fileFor(cacheDir, key);
+
+        // ② 磁盘缓存（原始歌词）
+        if (rawFile.exists()) {
             try {
-                String lrc = readFile(f);
-                List<Lrc.Line> lines = Lrc.parse(lrc);
-                if (!lines.isEmpty()) {
-                    apply(song, key, lines, cb, "磁盘缓存");
+                String lrc = readFile(rawFile);
+                List<Lrc.Line> raw = Lrc.parse(lrc);
+                if (!raw.isEmpty()) {
+                    // ②' 成品歌词：转写、折行、翻页都已完成 → 直接用，零算力
+                    List<Lrc.Line> ready = SyncLyric.read(syncFile);
+                    if (ready != null) {
+                        apply(song, key, ready, cb, "成品缓存", seq);
+                        return;
+                    }
+                    // 没有成品：先把原始歌词显示出来（不卡住），再后台补生成
+                    apply(song, key, raw, cb, "磁盘缓存", seq);
+                    final String srcLrc = lrc;
+                    io.execute(() -> buildSync(song, key, syncFile, srcLrc, cb, seq));
                     return;
                 }
             } catch (Exception e) {
@@ -143,32 +164,48 @@ public class LyricManager {
                 else lrc = null;
             }
 
-            // 解析 + 落盘
+            // 解析 + 落盘 + 预生成成品歌词（全部在 IO 线程）
             List<Lrc.Line> lines = null;
             if (lrc != null) {
-                lines = Lrc.parse(lrc);
-                if (lines.isEmpty()) {
-                    lines = null;
-                } else {
-                    writeFile(f, lrc);
+                List<Lrc.Line> parsed = Lrc.parse(lrc);
+                if (!parsed.isEmpty()) {
+                    writeFile(rawFile, lrc);
                     //noinspection ResultOfMethodCallIgnored
                     neg.delete();
+
+                    String built = null;
+                    try {
+                        built = SyncLyric.build(lrc);
+                    } catch (Throwable t) {
+                        Log2.w(TAG, "生成成品歌词失败: " + t);
+                    }
+                    if (built != null) {
+                        SyncLyric.write(syncFile, built);
+                        lines = Lrc.parse(built);
+                        if (lines.isEmpty()) lines = parsed;
+                        else src = src + "+成品";
+                    } else {
+                        lines = parsed;
+                    }
                 }
             }
 
             final List<Lrc.Line> result = lines;
             final String source = src;
             final boolean hadNetError = netError[0];
+            // 负缓存也放到 IO 线程写，别占主线程
+            if (result == null && !hadNetError) writeFile(neg, "1");
+
             main.post(() -> {
+                if (seq != loadSeq) return;
                 if (result != null && !result.isEmpty()) {
-                    apply(song, key, result, cb, source);
+                    apply(song, key, result, cb, source, seq);
                 } else {
                     if (hadNetError) {
                         // 网络问题：不写负缓存，下次切回来还能重试
                         Log2.i(TAG, "网络异常导致无歌词，不写负缓存: " + song.title);
                     } else {
                         Log2.i(TAG, "无歌词: " + song.title + " - " + song.artist);
-                        writeFile(neg, "1");
                     }
                     current = null;
                     currentKey = key;
@@ -176,6 +213,25 @@ public class LyricManager {
                 }
             });
         });
+    }
+
+    /**
+     * 后台把原始 LRC 转成车机专用成品歌词，并写盘。
+     * 只在「原始歌词已显示、但成品还没生成」时走这条路径，不阻塞首屏。
+     */
+    private void buildSync(NowPlaying song, String key, File syncFile,
+                           String lrc, Callback cb, int seq) {
+        try {
+            String built = SyncLyric.build(lrc);
+            if (built == null) return;
+            List<Lrc.Line> lines = Lrc.parse(built);
+            if (lines.isEmpty()) return;
+            SyncLyric.write(syncFile, built);
+            Log2.i(TAG, "成品歌词就绪: " + song.title + " 共 " + lines.size() + " 屏");
+            main.post(() -> apply(song, key, lines, cb, "成品缓存", seq));
+        } catch (Throwable t) {
+            Log2.w(TAG, "生成成品歌词失败: " + t);
+        }
     }
 
     // ---------------- lrclib 三级降级 ----------------
@@ -308,6 +364,9 @@ public class LyricManager {
             int code = c.getResponseCode();
             if (code == 429) {
                 Log2.w(TAG, "lrclib 限流，Retry-After=" + c.getHeaderField("Retry-After"));
+                // ★ 限流是「这次没问出结果」，不是「确实没有歌词」。
+                //   不置位会被当成 404 一样写 6 小时负缓存，一次限流就让这首歌消失半天。
+                lastHttpWasNetworkError = true;
                 return null;
             }
             if (code == 404) {
@@ -336,8 +395,18 @@ public class LyricManager {
     /** 最近一次 httpGetJson 是否因为网络层失败（而非 404/429） */
     private volatile boolean lastHttpWasNetworkError = false;
 
+    /**
+     * 落地歌词并回调。
+     *
+     * ★ 必须先校验请求序号：IO 线程是串行的，快速切歌时旧请求的结果会晚于新请求到达，
+     *   不校验就会出现「放着 B、屏幕显示 A 的歌词」，而且会一直错到下次切歌。
+     */
     private void apply(NowPlaying song, String key, List<Lrc.Line> lines,
-                       Callback cb, String src) {
+                       Callback cb, String src, int seq) {
+        if (seq != loadSeq) {
+            Log2.i(TAG, "丢弃过期歌词(" + src + "): " + song.title);
+            return;
+        }
         current = lines;
         currentKey = key;
         Log2.i(TAG, "歌词就绪(" + src + "): " + song.title + " 共 " + lines.size() + " 句");

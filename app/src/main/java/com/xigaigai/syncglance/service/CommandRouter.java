@@ -64,7 +64,9 @@ public final class CommandRouter {
                 break;
             case CMD_SHOW_LYRIC:
                 Log2.i(TAG, "音乐：显示歌词");
-                svc.getRenderer().markDirty("showLyric");
+                // ★ 必须重新 load：「隐藏歌词」把 renderer 的歌词置空了，
+                //   只 markDirty 的话永远显示「无歌词信息」。
+                svc.reloadLyrics();
                 break;
             case CMD_HIDE_LYRIC:
                 Log2.i(TAG, "音乐：隐藏歌词");

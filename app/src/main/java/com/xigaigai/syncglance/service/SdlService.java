@@ -105,6 +105,20 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
         return lyricManager == null ? null : lyricManager.getCurrent();
     }
 
+    /**
+     * 「显示歌词」菜单：重新加载当前歌曲的歌词。
+     *
+     * 之前这里只做 markDirty，但「隐藏歌词」已经把 renderer 的歌词清成 null 了，
+     * 于是「隐藏 → 显示」永远回不来。重新走一遍 load 即可：
+     * 内存缓存命中会立刻同步回调，不会重新联网。
+     */
+    public void reloadLyrics() {
+        if (lyricManager == null || renderer == null) return;
+        NowPlaying np = renderer.getSong();
+        if (np == null) return;
+        lyricManager.load(np, (song, lines) -> renderer.setLyrics(lines));
+    }
+
     /** 当前歌曲的显示文字，没有就返回 null */
     public String nowPlayingText() {
         if (renderer == null) return null;
@@ -870,9 +884,10 @@ public class SdlService extends Service implements NotificationCatcher.MusicList
 
         // 换歌了，重新拉歌词
         if (songChanged) {
-            lyricManager.load(np, (song, lines) -> {
-                renderer.setLyrics(lines);
-            });
+            // ★ 先把上一首的歌词清掉：新歌词要查网络时可能要等几秒，
+            //   不清会拿新歌的播放进度去切旧歌的时间轴，显示出一段「时间错位」的歌词。
+            renderer.setLyrics(null);
+            lyricManager.load(np, (song, lines) -> renderer.setLyrics(lines));
         }
 
         // 用 SetMediaClockTimer 起一个播放计时（SYNC 规范做法）

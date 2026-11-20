@@ -21,8 +21,8 @@
 | 车型 | 2012 款福特福克斯（中国） |
 | 车机 | SYNC 1.1，MFD4 四寸屏，`graphicSupported = false` |
 | 协议 | SDL 2.1（`syncMsgVersion 2.0.0`），蓝牙 SPP 传输 |
-| SDK | `sdl_android:4.12.2` + `MultiplexTransportConfig` |
-| 构建 | AGP 9.5.1 / Gradle 9.6 / JDK 11 / `compileSdk 37`、`minSdk 24`、**`targetSdk 32`** |
+| SDK | `sdl_android:5.8.0` + `MultiplexTransportConfig`（4.12.2 的旧实现见 `legacy/sdl4` 分支） |
+| 构建 | AGP 9.5.1 / Gradle 9.6 / JDK 11 / `compileSdk 37`、`minSdk 24`、**`targetSdk 35`** |
 
 ## 能做什么
 
@@ -89,13 +89,14 @@ $pkg = "com.xigaigai.syncglance"
 
 | 约束 | 原因 |
 |---|---|
-| `targetSdk` 只能是 32 | 33+ 时 sdl_android 内部 `registerReceiver` 抛 `SecurityException` |
+| `targetSdk` 现在是 **35** | 4.12.2 时代只能锁 32：库内部老式两参 `registerReceiver` 会抛 `SecurityException`；sdl_android 5.7.0 修好后才允许提高（`legacy/sdl4` 分支仍是 32） |
 | 主题必须 `Theme.AppCompat.*` | 否则 Activity 启动即崩 |
 | 只有 `HMI_FULL` 能发 RPC | 其他等级发出去直接抛「没有有效连接」 |
 | `mediaTrack` 两屏共用一个值 | SYNC 协议限制，无法分屏 |
 | 一行只有 **7 个汉字 = 14 半角** | 实车照片实测（字段声明的 width=40 是假的） |
 | 时钟格没有小时位 | `StartTime(h,m,s)` 的 h 必须为 0，否则 `REJECTED` |
 | 车机不认 ⧗ ▶ ⏸ 和箭头 | 点阵字库缺字形，会渲染成「·」；统一由 `Glyphs.ENABLED` 控制 |
+| 日文转写走 kuromoji 分词 | 不是逐字加空格；规则见 [design.md §2.5.1](docs/design.md)，别自己加空格 |
 | 软键靠 `Show.softButtons` | **不是** `AddCommand`；回调走 `OnButtonPress{CUSTOM_BUTTON}` |
 | 车机识别只看名字含 `SYNC` | 外加 MAC 白名单兜底，避免蓝牙耳机误触发 |
 | `appName` 一旦定下永不改 | 它是车机策略表的查表键 |
@@ -107,12 +108,12 @@ app/src/main/java/com/xigaigai/syncglance/
 ├── activity/   MainActivity（控制面板）、LogActivity（日志 + 屏幕预览）
 ├── service/    SdlService（连接/菜单/按键）、NotificationCatcher、CommandRouter、KeyMap
 ├── display/    StateRenderer（四状态渲染）、SyncLifecycle、ScreenPreviewView、Glyphs、CharProbe
-├── lyric/      LyricManager（降级链 + 缓存）、NeteaseLyric、TitleNorm、Lrc
+├── lyric/      LyricManager（降级链 + 四级缓存）、SyncLyric（成品歌词）、Romaji（假名转写）、NeteaseLyric、TitleNorm、Lrc
 ├── nav/        AmapLinkClient（高德 AIDL）、LinkEnvelope（信封解密）
 ├── receiver/   BootReceiver、SdlReceiver、SyncRouterService（SDL 官方链路）
 ├── media/      NeteaseControl（系统媒体键）
 ├── model/      NowPlaying、Navigation
-└── util/       Log2（日志中枢）、Kana（假名转罗马音）
+└── util/       Log2（日志中枢）、Kana（假名罗马音底层表 + 降级兜底）
 ```
 
 ## 文档

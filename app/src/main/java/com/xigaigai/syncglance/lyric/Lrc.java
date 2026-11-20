@@ -139,8 +139,13 @@ public final class Lrc {
                 || (c >= 0xFF00 && c <= 0xFF60); // 全角标点
     }
 
-    /** 取前 n 个半角宽度单位的字符（不会把汉字切一半） */
-    private static String takeWidth(String s, int n) {
+    /** 单个字符的显示宽度（半角单位）。折行/切屏的计算共用这一口径。 */
+    public static int widthOfChar(char c) {
+        return isWide(c) ? 2 : 1;
+    }
+
+    /** 取前 n 个半角宽度单位的字符（不会把汉字切一半）。包内可见，供 SyncLyric 复用。 */
+    static String takeWidth(String s, int n) {
         if (s == null) return "";
         int w = 0;
         for (int i = 0; i < s.length(); ) {
@@ -153,6 +158,48 @@ public final class Lrc {
             i += step;
         }
         return s;
+    }
+
+    /**
+     * 在「半角宽度 n」附近切开，返回前半段。
+     *
+     * 宽度口径与 {@link #widthOf} 一致：汉字 2、ASCII 1。
+     *
+     * 两条规则：
+     *   ① 优先从空格处断开 —— 罗马音（`shi wa se na`）和德语歌词
+     *      从词中间切会很难读，所以在目标位置前后 3 个字符内找最近的空格
+     *   ② 找不到空格才硬切
+     *
+     * ★ 这是折行的<b>唯一实现</b>：实车渲染（StateRenderer）与
+     *   sync 缓存预生成（SyncLyric）都调这里，避免两套折行逻辑漂移。
+     */
+    public static String cutAtWidth(String s, int n) {
+        if (s == null || s.isEmpty()) return "";
+        if (n <= 0) return "";
+
+        // 先按半角宽度找到切点下标
+        int w = 0;
+        int target = -1;
+        for (int i = 0; i < s.length(); i++) {
+            int cw = isWide(s.charAt(i)) ? 2 : 1;
+            if (w + cw > n) { target = i; break; }
+            w += cw;
+        }
+        if (target < 0) return s;              // n 超过整串宽度，不用切
+        if (target == 0) target = 1;           // 至少切一个字符，避免死循环
+
+        // 在 target 前后找最近的空格（窗口 ±3）
+        int best = -1;
+        for (int d = 0; d <= 3; d++) {
+            int right = target + d;
+            if (right < s.length() && s.charAt(right) == ' ') { best = right; break; }
+            int left = target - d;
+            if (left > 0 && s.charAt(left) == ' ') { best = left; break; }
+        }
+        if (best > 0 && best < s.length()) {
+            return s.substring(0, best);
+        }
+        return s.substring(0, target);
     }
 
     /**

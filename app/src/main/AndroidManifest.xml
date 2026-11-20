@@ -3,12 +3,13 @@
   SyncGlance —— SYNC 1.1 车载助手
   歌曲信息 · 导航信息 · 计时器
 
-  关键约束（来自 AppLinkPro 实车测试）：
-  - targetSdk 必须是 32（见 app/build.gradle.kts）
+  关键约束：
+  - targetSdk 35（Android 15）：SDL 5.8.0 起可用；4.12.2 时代必须锁 32（见 legacy/sdl4 分支）
   - 主题必须是 Theme.AppCompat.*
   - 传输层用 MultiplexTransportConfig（车机才能发现）
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 蓝牙（Android 12+ 权限拆分）
          ★ 5.x 的 IntegrationValidator 会用当前 SDK 实际授予的权限去校验，
@@ -30,6 +31,10 @@
     <!-- 联网查歌词（lrclib.net） -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- ★ targetSdk 33+：前台服务的常驻通知必须靠它。不声明/不申请的话通知栏不显示，
+         前台服务的可见性和保活能力都会打折。运行时在 MainActivity 里申请。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- ★ 高德导航服务权限（dumpsys 显示 prot=normal，声明即可） -->
     <uses-permission android:name="com.autonavi.minimap.permission.NAVIGATION_SERVICE" />
@@ -56,7 +61,12 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+        android:theme="@style/Theme.AppCompat.Light.DarkActionBar"
+        android:windowOptOutEdgeToEdgeEnforcement="true"
+        tools:targetApi="35">
+        <!-- ★ windowOptOutEdgeToEdgeEnforcement：targetSdk 35 在 Android 15 上强制 edge-to-edge，
+             我们的界面是简单的 ScrollView / 固定高度预览，先临时退出避免被系统栏遮挡。
+             正式适配（insets 处理）留作独立任务，做完把这一行去掉。 -->
 
         <activity
             android:name=".activity.MainActivity"

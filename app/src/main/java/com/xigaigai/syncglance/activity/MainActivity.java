@@ -62,7 +62,7 @@ public class MainActivity extends AppCompatActivity {
         stateView = findViewById(R.id.tvState);
         softBtn = findViewById(R.id.btnSoftButton);
 
-        requestBtPermission();
+        requestRuntimePermissions();
 
         // ---- 音乐 ----
         findViewById(R.id.btnPlayNetease).setOnClickListener(v -> {
@@ -145,33 +145,59 @@ public class MainActivity extends AppCompatActivity {
         }
         sb.append("蓝牙权限：").append(btOk ? "✓" : "✗").append('\n');
 
-        // 2. 通知读取
+        // 2. 通知显示（targetSdk 33+ 前台服务通知必需）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            boolean postOk = ContextCompat.checkSelfPermission(this,
+                    Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+            sb.append("通知显示：").append(postOk ? "✓" : "✗（前台服务通知不会显示）").append('\n');
+        }
+
+        // 3. 通知读取（读歌名/歌词用，和上面那个不是一回事）
         boolean notifOk = NotificationCatcher.isEnabled(this);
         sb.append("通知读取：").append(notifOk ? "✓" : "✗").append('\n');
 
-        // 3. 高德关联启动（只能提示）
+        // 4. 高德关联启动（只能提示）
         sb.append("高德关联启动：需在系统设置里手动开启\n");
         sb.append("电池优化白名单：建议开启\n");
 
         new AlertDialog.Builder(this)
                 .setTitle("权限检查")
                 .setMessage(sb.toString())
-                .setPositiveButton("申请蓝牙", (d, w) -> requestBtPermission())
-                .setNeutralButton("开通知权限", (d, w) -> openNotifSettings())
+                .setPositiveButton("申请权限", (d, w) -> requestRuntimePermissions())
+                .setNeutralButton("开通知读取", (d, w) -> openNotifSettings())
                 .setNegativeButton("关闭", null)
                 .show();
     }
 
-    private void requestBtPermission() {
+    /**
+     * 申请运行时权限。
+     *
+     * 蓝牙（Android 12+ 拆分的那两个）和 **通知**（Android 13+）一起申请：
+     * targetSdk 提到 35 后，前台服务的常驻通知依赖 POST_NOTIFICATIONS，
+     * 不申请的话状态栏什么都不显示，服务被杀的概率也更高。
+     */
+    private void requestRuntimePermissions() {
+        java.util.List<String> need = new java.util.ArrayList<>();
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
                     != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{
-                        Manifest.permission.BLUETOOTH_CONNECT,
-                        Manifest.permission.BLUETOOTH_SCAN
-                }, 1001);
+                need.add(Manifest.permission.BLUETOOTH_CONNECT);
+                need.add(Manifest.permission.BLUETOOTH_SCAN);
             }
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                need.add(Manifest.permission.POST_NOTIFICATIONS);
+            }
+        }
+
+        if (need.isEmpty()) {
+            toast("权限都已授予");
+            return;
+        }
+        requestPermissions(need.toArray(new String[0]), 1001);
     }
 
     private void openNotifSettings() {

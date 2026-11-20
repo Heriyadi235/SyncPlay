@@ -5,9 +5,9 @@ import android.widget.TextView;
 
 import com.xigaigai.syncglance.R;
 import com.xigaigai.syncglance.lyric.Lrc;
+import com.xigaigai.syncglance.lyric.Romaji;
 import com.xigaigai.syncglance.model.Navigation;
 import com.xigaigai.syncglance.model.NowPlaying;
-import com.xigaigai.syncglance.util.Kana;
 
 import java.util.List;
 import java.util.Locale;
@@ -192,17 +192,17 @@ public class ScreenPreviewView {
         track2 = previewPrefix(trackKind, track2, timerRunning, timerActive, nav, song) + track2;
 
         // 第 1 屏
-        tvS1L1.setText(truncate(Kana.romajiSpaced(p1l1)));
-        tvS1L2.setText(truncate(Kana.romajiSpaced(p1l2)));
+        tvS1L1.setText(truncate(Romaji.convert(p1l1)));
+        tvS1L2.setText(truncate(Romaji.convert(p1l2)));
         // 第 3 行左侧 = mediaTrack
-        tvS1L3.setText(truncate(Kana.romajiSpaced(track1)));
+        tvS1L3.setText(truncate(Romaji.convert(track1)));
         // 第 3 行右侧 = 计时器 / ETA
         tvS1Timer.setText(clockText);
 
         // 第 2 屏
-        tvS2L1.setText(truncate(Kana.romajiSpaced(p2l1)));
-        tvS2L2.setText(truncate(Kana.romajiSpaced(p2l2)));
-        tvS2L3.setText(truncate(Kana.romajiSpaced(track2)));
+        tvS2L1.setText(truncate(Romaji.convert(p2l1)));
+        tvS2L2.setText(truncate(Romaji.convert(p2l2)));
+        tvS2L3.setText(truncate(Romaji.convert(track2)));
         tvS2Timer.setText(clockText);
 
         // ---- 软键区 ----

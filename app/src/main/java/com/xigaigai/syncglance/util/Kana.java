@@ -100,13 +100,26 @@ public final class Kana {
     private Kana() { }
 
     /**
-     * 转罗马音，并且**每个假名单元之间加空格**，方便阅读。
+     * 转罗马音，并且**每个假名单元之间加空格**。
+     *
+     * @deprecated 这是早期的「逐字空格」实现，已被 {@link com.xigaigai.syncglance.lyric.Romaji#convert}
+     *             取代（按词切分、送假名不空格）。现在只作为 kuromoji 不可用时的兜底，
+     *             由 {@code Romaji} 内部调用，业务代码不要再直接用它。
      *
      * 例：きみがいれば → ki mi ga i re ba
      *
      * 汉字、英文、数字原样保留，不加额外空格。
      */
+    @Deprecated
     public static String romajiSpaced(String input) {
+        return com.xigaigai.syncglance.lyric.Romaji.convert(input);
+    }
+
+    /**
+     * 严格逐字空格的<b>旧</b>实现，仅供 {@code Romaji} 在 kuromoji 不可用时兜底。
+     * 业务代码请用 {@link #romajiSpaced} 或 {@code Romaji.convert}。
+     */
+    public static String romajiLegacy(String input) {
         if (input == null || input.isEmpty()) return input;
         if (!containsKana(input)) return input;
 
@@ -169,7 +182,85 @@ public final class Kana {
         return out.toString().replaceAll(" {2,}", " ").trim();
     }
 
-    private static boolean isKatakana(char c) {
+    /**
+     * 把一段<b>只含假名</b>的文本转成小写罗马音（平文式）。
+     *
+     * 与 {@link #romajiLegacy} 的区别：<b>不加空格、不分大小写</b>，
+     * 词边界与大小写由 {@code Romaji} 决定。这是给分词器用的底层积木。
+     *
+     * 平文式细节（对齐维基百科「平文式罗马字」）：
+     *   - 促音：双写后续辅音，但 sh→ssh、ch→tch、ts→tts（こっち→kotchi）
+     *   - 拨音：后接元音或 y 时写 n'（しんよう→shin'you）
+     *   - 长音 ー：重复前一个元音（ラーメン→raamen），不用 macron
+     */
+    public static String romajiOfKana(String kana) {
+        if (kana == null || kana.isEmpty()) return "";
+        StringBuilder out = new StringBuilder(kana.length() + 4);
+        int i = 0;
+        int n = kana.length();
+
+        while (i < n) {
+            char c = kana.charAt(i);
+
+            // 促音：双写后续辅音
+            if (c == 'っ' || c == 'ッ') {
+                String next = nextRomaji(kana, i + 1);
+                if (!next.isEmpty()) {
+                    if (next.startsWith("ch")) out.append('t');
+                    else if (next.startsWith("sh")) out.append('s');
+                    else if (next.startsWith("ts")) out.append('t');
+                    else if ("aiueo".indexOf(next.charAt(0)) < 0) out.append(next.charAt(0));
+                }
+                i++;
+                continue;
+            }
+
+            // 长音：重复前一个元音
+            if (c == 'ー') {
+                if (out.length() > 0) {
+                    char last = out.charAt(out.length() - 1);
+                    if ("aiueo".indexOf(last) >= 0) out.append(last);
+                }
+                i++;
+                continue;
+            }
+
+            // 拗音（两字符）
+            if (i + 1 < n) {
+                String y = YOON.get(kana.substring(i, i + 2));
+                if (y != null) {
+                    out.append(y);
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // 拨音：后接元音 / y 时加撇号
+            if (c == 'ん' || c == 'ン') {
+                String next = nextRomaji(kana, i + 1);
+                boolean apostrophe = !next.isEmpty()
+                        && ("aiueo".indexOf(next.charAt(0)) >= 0 || next.charAt(0) == 'y');
+                out.append(apostrophe ? "n'" : "n");
+                i++;
+                continue;
+            }
+
+            String s = SINGLE.get(c);
+            if (s != null) {
+                out.append(s);
+                i++;
+                continue;
+            }
+
+            // 非假名（防御性）：原样
+            out.append(c);
+            i++;
+        }
+        return out.toString();
+    }
+
+
+    public static boolean isKatakana(char c) {
         return c >= 0x30A1 && c <= 0x30FF;
     }
 

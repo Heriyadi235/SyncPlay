@@ -239,17 +239,25 @@ mediaTrack 最前面固定一个字符，**跟随该行内容类型**（不跟�
 - 单句 **≤ 7 个汉字** → 当前句 + 下一句
 - 每行超过 7 字**由车机自动截断**（字段宽度 40 字符，实际显示约 7 汉字）
 
-### 3.5 假名转罗马音
+### 3.5 假名转罗马音（2026-11 改为**词级**）
 
-车机没有日语字库，假名会显示成方块。所有发往车机的字符串都经过 `Kana.romajiSpaced()`：
+车机没有日语字库，假名会显示成方块。所有发往车机的字符串都经过 `Romaji.convert()`：
 
 ```
-きみがいれば → ki mi ga i re ba
+きみがいれば   → kimi ga ireba       ← 按词切分
+私 は 学生 です → 私 wa 学生 desu
+新しい         → 新shii              ← 送假名紧跟汉字，不空格
+カラオケ       → KARAOKE             ← 片假名词段大写
 ```
 
-- 支持平假名/片假名/拗音/促音/长音
-- 汉字和英文保留原样
-- 每个假名单元之间加空格便于阅读
+- 词边界由 **kuromoji（IPADIC）** 给，规则 R1~R9 见 [design.md §2.5.1](design.md)
+- 接续助词粘前词（`いれ` + `ば` → `ireba`），格助词（は・が・を）仍然空格
+- 拼写用平文式；长音不用 macron（车机字库只认 ASCII），改为重复元音
+- 中文 / 英文 / 德语**不含假名** → 原样返回，不会被分词加空格
+- kuromoji 不可用（老设备 OOM、资源缺失）时自动降级 `Kana.romajiLegacy`
+  （旧的逐字空格），显示链路不中断
+- 首次初始化 1~2 秒（词典 12.7 MiB 打在 jar 内），只发生一次；
+  初始化发生在 IO 线程，不阻塞首屏
 
 ---
 
@@ -287,7 +295,7 @@ proxy = builder.build();   // 同步返回，不是 SdlManager.start()
 
 | 约束 | 原因 |
 |---|---|
-| `targetSdk = 32` | 33+ 时 SDK 内部 `registerReceiver` 会抛 SecurityException |
+| `targetSdk = 32` | 33+ 时 SDK 内部 `registerReceiver` 会抛 SecurityException（4.12.2 限制；5.8.0 起已提到 35） |
 | 主题必须是 `Theme.AppCompat.*` | 否则 Activity 启动崩溃 |
 | 装完执行 `pm uninstall --user 900 <pkg>` | 否则应用分身导致"闪退"假象 |
 | `languageDesired` 传 null | 硬编码会在车机语言被切换时注册失败（`WRONG_LANGUAGE`） |
@@ -679,15 +687,35 @@ private final Runnable positionTicker = ... // 构造时启动
 
 ```
 ① 内存缓存
-② 磁盘缓存（key = 原始完整歌名 + 歌手 的 MD5，不含时长）
+② 成品缓存（.sync.lrc：转写 + 折行 + 翻页都做完，显示时零算力）
+②' 原始磁盘缓存（.lrc，key = 原始完整歌名 + 歌手 的 MD5，不含时长）
 ②.5 负缓存（.none 文件，6 小时过期）—— 跳过网络
-③-A 网易云：搜歌（用 TitleNorm.queryTitle）→ 打分选候选 → 拉 lrc
+③-A 网易云：搜歌（用**原始完整歌名**，不剥括号）→ 打分选候选 → 拉 lrc
 ③-B lrclib 三级：
       级别1  原名精确匹配
       级别2  剥括号后精确匹配
       级别3  /api/search 模糊搜索，按时长最接近挑一条
 ④ 显示"无歌词信息"
 ```
+
+**成品歌词缓存（第 ② 层）**：
+
+| 项 | 值 |
+|---|---|
+| 文件 | `<cacheDir>/lyrics/<md5>.v1-14x2.sync.lrc` |
+| 首行签名 | `#syncglance sync-lyric v1; units=14; pages=2; romaji=hepburn; caps=kana-seg` |
+| 行格式 | `[mm:ss.mmm]第一行␟第二行`（每行 = 一屏，U+241F 分隔，第二行可为空） |
+| 失效 | 首行签名不一致 → 整份作废重建 |
+
+- 只有 `.lrc` 而没有成品时：**先按旧路径显示**（不卡首屏），后台生成后替换。
+- 0.5 秒提前量不写进文件 —— 那是查询时的补偿，改它不用重建缓存。
+- 生成失败（比如 kuromoji 崩了）不影响显示：继续走旧路径，本次不写文件。
+
+**竞态：请求序号**（`LyricManager.loadSeq`）
+
+IO 是单线程且请求不可取消。快速切歌 A→B→A 时，A 的旧网络结果会晚于新请求返回，
+以前会直接把 `current` / `renderer.lyrics` 覆盖成 A 的歌词，而车机在放 B。
+现在每次 `load()` 自增序号，回调前比对，不一致就丢弃（日志：`丢弃过期歌词`）。
 
 **网易云候选打分规则**（`NeteaseLyric.pickBest`）：
 
@@ -773,7 +801,7 @@ android {
     defaultConfig {
         applicationId = "com.xigaigai.syncglance"
         minSdk = 24
-        targetSdk = 32        // ★ 必须是 32
+        targetSdk = 35        // 4.12.2 时代必须是 32；5.8.0 起 35
     }
 }
 
@@ -882,10 +910,12 @@ app/src/main/java/com/xigaigai/syncglance/
 │   ├── AmapLinkClient.java        高德 AIDL 通信
 │   └── LinkEnvelope.java          AES-GCM 信封解密
 ├── lyric/
-│   ├── LyricManager.java          歌词调度 + 缓存 + 负缓存
+│   ├── LyricManager.java          歌词调度 + 四级缓存 + 请求序号
+│   ├── SyncLyric.java             成品歌词（转写+折行+翻页）预生成与读写
+│   ├── Romaji.java                假名→罗马音（kuromoji 分词 + 平文式规则）
 │   ├── NeteaseLyric.java          网易云主源（搜索 + 拉 lrc）
 │   ├── TitleNorm.java             查询用歌名提取（A/B 类括号）
-│   └── Lrc.java                   LRC 解析
+│   └── Lrc.java                   LRC 解析 / 宽度 / 折行
 ├── media/
 │   └── NeteaseControl.java        媒体按键控制
 ├── model/
@@ -895,7 +925,7 @@ app/src/main/java/com/xigaigai/syncglance/
 │   └── BootReceiver.java          蓝牙/开机事件
 └── util/
     ├── Log2.java                  日志中枢
-    └── Kana.java                  假名转罗马音
+    └── Kana.java                  假名罗马音底层表 + 旧逐字实现（降级兜底）
 ```
 
 ---
@@ -1345,6 +1375,39 @@ Unicode 把所有文字统一到一个码位空间，但**车机字库是按某�
 
 ---
 
+### 8.22 成品歌词的分隔符不能用控制字符
+
+**现象**：`SyncLyric` 最初用 `\u0001` 做「一屏两行」的分隔符，单测直接失败
+（`每屏必须是两行 expected:<2> but was:<1>`）。
+
+**原因**：`Lrc.parse()` 对每行文本做了 `trim()`，而 `String.trim()`
+会删掉所有 **≤ U+0020** 的字符 —— 第二行为空时，行尾的 `\u0001` 被无声吃掉，
+「成品」与「原始 LRC」再也分不出来。
+
+**解决**：分隔符改成 **U+241F（␟ SYMBOL FOR UNIT SEPARATOR）**：
+码位远高于空白、不会被 trim、肉眼可辨、不会出现在歌词里。
+
+> 教训：凡是「写进文本文件再解析回来」的标记，都要考虑解析端会不会 `trim()`。
+
+### 8.23 两个 kuromoji jar 带的许可文件重名，AGP 8 直接构建失败
+
+**现象**：
+
+```
+2 files found with path 'META-INF/CONTRIBUTORS.md' from inputs:
+  kuromoji-ipadic-0.9.0.jar
+  kuromoji-core-0.9.0.jar
+```
+
+**原因**：`kuromoji-ipadic` 传递依赖 `kuromoji-core`，两个 jar 各带一份
+`META-INF/CONTRIBUTORS.md` 和 `META-INF/LICENSE.md`。AGP 8 遇到重名资源
+不再「后者覆盖」，而是直接失败。
+
+**解决**：`app/build.gradle.kts` 里加 `packaging.resources.pickFirsts`，
+只保留第一份。两个文件**哈希完全一致**，取哪份都一样；
+许可文件仍留在 APK 里，不破坏 Apache-2.0 的声明要求
+（`NOTICE.md` 只有 ipadic 带，不冲突，会自动保留）。
+
 ## 九、界面规范
 
 ### 9.1 主界面布局
@@ -1608,7 +1671,7 @@ $adb = "C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 | 歌名带括号导致匹配失败 | 网易云曲名常带「(中文名)」 | ✅ 查询时剥 A 类括号 |
 | Live/翻唱版歌词串台 | 剥括号会抹掉版本信息 | ✅ key 用原始歌名 + B 类标签保护 |
 | 歌词比声音慢半拍 | 车机刷新 1 秒 | ✅ 提前 0.5 秒 |
-| 罗马音太长被截断 | 假名逐字加空格后宽度翻倍 | ⚠️ 一行 14 半角放不下，会 `...` |
+| 罗马音太长被截断 | 逐字加空格时宽度翻倍（现已改词级转换） | ✅ 多数句子能一行放下；极长句走翻页 |
 | `⧗` / `⏸` 字形未验证 | 车机点阵字体可能缺这两字 | ⚠️ 上车确认，缺则换 ASCII |
 | 网易云接口随时可能收紧 | 非公开接口，无契约 | ⚠️ lrclib 作为完整后备 |
 | 锁屏界面未实现 | 未开发 | ❌ Ford 验证项会失败 |
@@ -1657,7 +1720,11 @@ $adb = "C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 - [ ] 第 3 行右侧显示播放进度在**走动**
 - [ ] **不打开信息页（预览页）时，歌词也会自动滚动**（§8 心跳修复）
 - [ ] 无歌词的歌 → 第 2 屏显示「无歌词信息」
-- [ ] 日文歌名 → 显示成罗马音（如 `ki mi ga i re ba`）
+- [ ] 日文歌名/歌词 → 显示成**词级**罗马音（如 `kimi ga ireba`，不是 `ki mi ga i re ba`）
+- [ ] 独立助词处理正确：`私 は 学生 です` → `私 wa 学生 desu`
+- [ ] 送假名不空格：`新しい` → `新shii`
+- [ ] 片假名歌名整段大写：`カラオケ` → `KARAOKE`
+- [ ] 第 2 屏长句已按新宽度折行，**没有出现 `...` 截断**
 - [ ] 暂停超过 60 秒 → 自动回到欢迎页
 - [ ] 从下拉栏划掉网易云媒体控件 → 自动回到欢迎页
 
@@ -1721,3 +1788,7 @@ $adb = "C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 | 日志出现「网络异常导致无歌词，不写负缓存」 | 断网了，不会污染缓存，联网后切歌即可重试 |
 | 界面卡在旧内容 | 点「重置连接」 |
 | 时间不显示 | 车机是否真的在 FULL 状态（看日志 `OnHMIStatus`） |
+| 日文歌词还是逐字空格 | 搜 `kuromoji 初始化失败`：词库加载失败已降级；或旧缓存作祟，清 `cache/lyrics/*.sync.lrc` |
+| 日志出现「成品歌词就绪」 | 正常：转写+折行已落盘，下次直接读，不用再算 |
+| 日志出现「丢弃过期歌词」 | 正常：快速切歌时旧请求的结果被序号拦下 |
+| 换歌瞬间第 2 屏闪一下「无歌词信息」 | 预期行为：新歌词未到前先清空，避免拿新歌进度切旧歌时间轴 |

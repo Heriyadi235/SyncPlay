@@ -153,7 +153,7 @@ Get-Content <工作目录>\artifacts\build.log | Select-String 'BUILD|error:'
 **SyncGlance 的关键配置**（别改错）：
 ```kotlin
 applicationId = "com.xigaigai.syncglance"
-compileSdk 37 / minSdk 24 / **targetSdk 32**     // targetSdk 33+ 会让 SDK 内部崩
+compileSdk 37 / minSdk 24 / **targetSdk 35**     // 仅 4.12.2 需锁 32；SDL 5.8.0 起为 35
 implementation("com.smartdevicelink:sdl_android:4.12.2")
 android.enableJetifier=true                       // gradle.properties 里
 主题用 @style/Theme.AppCompat.Light.DarkActionBar // 不能是系统主题
@@ -174,7 +174,7 @@ android.enableJetifier=true                       // gradle.properties 里
 |---|---|---|
 | 启动弹"选择要使用的应用程序" | 应用分身副本 | `pm uninstall --user 900 $pkg`（必须在 install 之后做） |
 | 崩溃：`You need to use a Theme.AppCompat theme` | 主题不对 | 用 `@style/Theme.AppCompat.Light` |
-| 崩溃：`RECEIVER_EXPORTED or RECEIVER_NOT_EXPORTED` | targetSdk ≥ 33 | 降到 32 |
+| 崩溃：`RECEIVER_EXPORTED or RECEIVER_NOT_EXPORTED` | targetSdk ≥ 33（仅 4.12.2） | 降到 32，或升级到 sdl_android ≥ 5.7.0 |
 | 崩溃：`You need to use a Theme...`（另一处） | 同上 | 同上 |
 | 应用打开后闪退 | 服务启动异常 | 看 logcat 的 `FATAL EXCEPTION` |
 | 主界面正常但 SdlService 不出现 | 多半还是分身副本抢了启动 | 查 `dumpsys activity services <pkg>`，再清一次分身 |
