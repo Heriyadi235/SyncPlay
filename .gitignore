@@ -14,3 +14,6 @@ build/
 .externalNativeBuild
 .cxx
 local.properties
+# AGENTS.md：AI 协作规则。允许写本机绝对路径 / 设备标识（用户指定），
+# 所以**不入库**，文件本身仍留在本地工作区。
+AGENTS.md
