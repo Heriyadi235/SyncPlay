@@ -199,4 +199,21 @@ OnKeyboardInput  OnTouchEvent  OnWayPointChange
 | `SetGlobalProperties` | `TTSChunk` 必须带 `name` 字段 |
 | `Show` | 覆盖式：不带 `softButtons` 上一次的按钮就消失；`setMediaTrack("")` 才能真正清空 |
 
+---
+
+## 六、语言：全程用中文
+
+**思考过程和输出都用中文**，不要用英文推理再翻译。
+
+| 场景 | 要求 |
+|---|---|
+| 内部推理 / 分析 | 中文 |
+| 回复用户 | 中文 |
+| 代码注释、提交说明、文档 | 中文 |
+| 变量名、类名、API 名、RPC 字段名 | 保持英文原文（如 `mainField1`、`SetMediaClockTimer`、`OnHMIStatus`） |
+| 引用的报文字段、日志原文 | 原样引用，不要翻译 |
+
+理由：这个项目的所有文档、日志、踩坑记录都是中文的，
+用英文思考会在术语（"恢复连接""软键""车机"）上产生偏差。
+
 
