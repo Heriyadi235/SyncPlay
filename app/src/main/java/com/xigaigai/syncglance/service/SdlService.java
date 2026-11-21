@@ -339,6 +339,10 @@ public class SdlService extends Service {
             stopForeground(STOP_FOREGROUND_REMOVE);
         } catch (Exception ignored) { }
 
+        // 服务退出前把日志缓冲刷到文件。
+        // 连接类问题最关键的证据往往就是"最后几秒"，攒批写可能会漏掉它们。
+        try { Log2.flushNow(); } catch (Exception ignored) { }
+
         super.onDestroy();
     }
 

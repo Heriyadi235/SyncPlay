@@ -48,11 +48,119 @@ public final class Log2 {
      */
     private static volatile boolean rawEnabled = true;
 
+    // ---------------- 落盘 ----------------
+
+    /*
+     * 为什么要落盘：
+     *   内存日志一进程死就没了，而连接类问题（开机后 Router 起得慢、重连时
+     *   SdlService 没起来）恰恰发生在**进程重启前后** —— 最需要的证据刚好被切断。
+     *
+     * 为什么不是每条都写文件：
+     *   刚做完功耗优化，不能又搞出每秒几次 IO。
+     *   所以是「内存缓冲 + 攒够 8KB 或过了 5 秒才落一次」。
+     */
+
+    /** 待落盘的缓冲 */
+    private static final StringBuilder pending = new StringBuilder();
+    /** 攒多久落一次 */
+    private static final long FLUSH_INTERVAL_MS = 5_000;
+    /** 攒多少字节落一次 */
+    private static final int FLUSH_BYTES = 8 * 1024;
+    /** 文件上限，超了砍掉前半段 */
+    private static final long MAX_FILE_BYTES = 200 * 1024;
+
+    private static java.io.File logFile;
+    private static long lastFlushAt = 0;
+
     private Log2() { }
 
     /** 在 Application 或首个 Service 里初始化一次 */
     public static void init(Context ctx) {
         if (appContext == null) appContext = ctx.getApplicationContext();
+        if (logFile == null) {
+            try {
+                // app 专属外部目录：免权限、用户能用文件管理器拿到、不会被系统随意清
+                java.io.File dir = appContext.getExternalFilesDir(null);
+                if (dir == null) dir = appContext.getFilesDir();
+                if (dir != null) logFile = new java.io.File(dir, "syncplay.log");
+            } catch (Exception ignored) { }
+        }
+    }
+
+    /** 落盘文件的绝对路径（信息页可以显示给用户，方便取文件） */
+    public static String logFilePath() {
+        return logFile == null ? "" : logFile.getAbsolutePath();
+    }
+
+    /** 把 buffer 里的内容追加到文件（攒够才落） */
+    private static void appendToFile(String line) {
+        if (logFile == null) return;
+
+        String batch;
+        synchronized (Log2.class) {
+            pending.append(line).append('\n');
+            long now = System.currentTimeMillis();
+            if (pending.length() < FLUSH_BYTES && now - lastFlushAt < FLUSH_INTERVAL_MS) return;
+            // 到点或攒够了：把这批取走，锁内不做 IO
+            batch = pending.toString();
+            pending.setLength(0);
+            lastFlushAt = now;
+        }
+        writeBatch(batch);
+    }
+
+    /** 立刻把缓冲写下去（进程收尾时用） */
+    public static void flushNow() {
+        String batch;
+        synchronized (Log2.class) {
+            if (pending.length() == 0) return;
+            batch = pending.toString();
+            pending.setLength(0);
+            lastFlushAt = System.currentTimeMillis();
+        }
+        writeBatch(batch);
+    }
+
+    private static void writeBatch(String batch) {
+        if (logFile == null || batch == null || batch.isEmpty()) return;
+        try {
+            if (logFile.length() + batch.length() > MAX_FILE_BYTES) trimFile();
+            try (java.io.FileOutputStream out =
+                         new java.io.FileOutputStream(logFile, true)) {
+                out.write(batch.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) { }
+    }
+
+    /** 文件超限时砍掉前半段，避免无限增长 */
+    private static void trimFile() {
+        java.io.FileInputStream in = null;
+        try {
+            long len = logFile.length();
+            if (len <= 0) return;
+            long skip = len / 2;
+            in = new java.io.FileInputStream(logFile);
+            long skipped = 0;
+            while (skipped < skip) {
+                long s = in.skip(skip - skipped);
+                if (s <= 0) break;
+                skipped += s;
+            }
+            byte[] tail = new byte[(int) (len - skipped)];
+            int read = 0;
+            while (read < tail.length) {
+                int n = in.read(tail, read, tail.length - read);
+                if (n <= 0) break;
+                read += n;
+            }
+            try (java.io.FileOutputStream out =
+                         new java.io.FileOutputStream(logFile, false)) {
+                out.write(tail, 0, read);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ignored) { }
+        }
     }
 
     public static void setRawEnabled(boolean on) {
@@ -102,6 +210,8 @@ public final class Log2 {
         // ★ 以前这里会 ctx.sendBroadcast(ACTION_LOG)，但全项目没有任何接收者
         //   （信息页是直接读内存的），等于每条日志白发一次跨进程 IPC。
         //   Show 每秒一次 + 各种日志，白发的广播非常可观 —— 已移除。
+        // 落盘：攒批写，不是每条都 IO
+        appendToFile(full.trim());
     }
 
     // ---------------- 原始 JSON ----------------
@@ -125,6 +235,8 @@ public final class Log2 {
             uiLines.addLast(TS_UI.format(new Date()) + "    " + direction + " " + preview);
             while (uiLines.size() > MAX_UI_LINES) uiLines.removeFirst();
         }
+        // 原始 JSON 也落盘（排查时最有用的一类）
+        appendToFile(TS_FULL.format(new Date()) + "  " + direction + " " + one);
     }
 
     /**
@@ -168,7 +280,15 @@ public final class Log2 {
         synchronized (Log2.class) {
             uiLines.clear();
             fullLog.setLength(0);
+            pending.setLength(0);
         }
+        // 文件也一起清掉，否则"清空"只是清了半个
+        try {
+            if (logFile != null && logFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                logFile.delete();
+            }
+        } catch (Exception ignored) { }
     }
 
     /**
@@ -180,7 +300,16 @@ public final class Log2 {
             uiCount = uiLines.size();
             fullLen = fullLog.length();
         }
+        String fileInfo = "";
+        try {
+            if (logFile != null && logFile.exists()) {
+                fileInfo = "，落盘 " + (logFile.length() / 1024) + "KB";
+            } else {
+                fileInfo = "，落盘未启用";
+            }
+        } catch (Exception ignored) { }
         return "界面 " + uiCount + " 行 / 完整日志 " + fullLen + " 字符"
+                + fileInfo
                 + "，原始JSON " + (rawEnabled ? "开" : "关");
     }
 }
