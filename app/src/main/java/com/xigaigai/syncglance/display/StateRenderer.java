@@ -289,6 +289,8 @@ public class StateRenderer {
     public void onLifecycleChanged() {
         warnedNotFull = false;
         dirty = true;
+        // 车机连上/断开会影响「有没有人在看」，位置心跳要重新评估
+        ensureTickers();
         schedule();
     }
 
@@ -331,10 +333,12 @@ public class StateRenderer {
      * 按需启停后台轮询 —— <b>省电的关键</b>。
      *
      * <pre>
-     *   positionTicker（900ms）：前提是「有歌」。
+     *   positionTicker（900ms）：前提是「有歌」<b>且「有人在看」</b>。
      *       它做三件事：拉播放位置（歌词滚动的心跳）、判断暂停超时退回欢迎页、
      *       以及触发 markDirty 让 Show/预览更新。
      *       ★ 条件必须是「有歌」而不是「在播」—— 暂停超时那段逻辑也要靠它。
+     *       ★ 还必须「有人在看」：既没连车机、信息页也没打开时，歌词滚给谁看？
+     *         这种情况（听歌但没上车）是最常见的闲置态，让它零轮询。
      *
      *   staleWatchdog（2s）：前提是「有导航数据」。
      *       它负责在高德闪退/退出导航后把界面降级，
@@ -344,11 +348,14 @@ public class StateRenderer {
      * 以前这两条是在构造函数里无条件启动的，而 {@code StateRenderer} 由
      * {@code SyncPlayCore} 在 {@code Application.onCreate} 就创建 ——
      * 于是不管有没有音乐/导航，整个进程生命周期都在每 900ms / 2s 醒一次。
+     *
+     * <p>公开是因为「有人在看」这个条件会变（信息页开关、车机连上/断开），
+     * 外部需要在那些时机调用一次。</p>
      */
-    private void ensureTickers() {
-        // ① 播放位置心跳：有歌才跑
+    public void ensureTickers() {
+        // ① 播放位置心跳：有歌 + 有人在看
         main.removeCallbacks(positionTicker);
-        if (song != null) {
+        if (song != null && anyoneWatching()) {
             main.postDelayed(positionTicker, POSITION_POLL_MS);
         }
 
@@ -357,6 +364,16 @@ public class StateRenderer {
         if (nav != null && nav.hasData()) {
             main.postDelayed(staleWatchdog, STALE_CHECK_MS);
         }
+    }
+
+    /**
+     * 有人在看吗 —— 车机正在显示，或者信息页的预览可见。
+     *
+     * 都不成立时，位置心跳纯属空转（拉到的位置没人用）。
+     */
+    private boolean anyoneWatching() {
+        if (lifecycle != null && lifecycle.canDisplay()) return true;
+        return com.xigaigai.syncglance.nav.AmapLinkClient.isPreviewVisible();
     }
 
     /**

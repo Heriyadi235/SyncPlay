@@ -179,6 +179,8 @@ public class LogActivity extends AppCompatActivity {
          */
         AmapLinkClient.setPreviewVisible(true);
         previewCtrl.render(SyncPlayCore.get().renderer().getLastFrame());
+        // 预览可见 = 「有人在看」，位置心跳要跟着起来（歌词才会滚）
+        SyncPlayCore.get().renderer().ensureTickers();
         main.post(ticker);
     }
 
@@ -186,6 +188,8 @@ public class LogActivity extends AppCompatActivity {
     protected void onPause() {
         main.removeCallbacks(ticker);
         AmapLinkClient.setPreviewVisible(false);
+        // 预览不可见了，位置心跳可能就该停了（没连车机时尤其要停）
+        SyncPlayCore.get().renderer().ensureTickers();
         super.onPause();
     }
 
