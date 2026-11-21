@@ -102,7 +102,13 @@ public class StateRenderer {
      */
     public static final int SOFT_KEY_MAX = 12;
 
-    private volatile int softKeyCount = 1;
+    private volatile int softKeyCount = SOFT_KEY_DEFAULT;
+
+    /** 默认软键数：播放/暂停、测试键、计时 */
+    public static final int SOFT_KEY_DEFAULT = 3;
+
+    /** 第 3 格固定是「计时」键（下标 2） */
+    public static final int TIMER_KEY_INDEX = 2;
 
     public void setSoftKeyCount(int n) {
         this.softKeyCount = Math.max(1, Math.min(SOFT_KEY_MAX, n));
@@ -127,20 +133,35 @@ public class StateRenderer {
     /**
      * 底栏要显示的全部软键文本（预览用）。
      *
-     * 第 1 格永远是播放/暂停；后面 softKeyCount-1 个是测试键「键2」「键3」…
-     * 和 doShow() 里构造 SoftButton 的逻辑保持一致。
+     * 固定布局（共 4 格，第 4 格「更多…」由车机自带）：
+     * <pre>
+     *   格1 播放/暂停   格2 测试键   格3 计时
+     *   9001           9002        9003
+     * </pre>
+     * 「软键测试」把数量调到 >3 时，第 4 格起追加「键4」「键5」…；
+     * 调到 <3 时计时键会跟着消失（那是测试模式，属预期）。
      */
     public java.util.List<String> getSoftKeyTexts() {
         java.util.List<String> out = new java.util.ArrayList<>();
         out.add(getSoftKey1());
         for (int i = 2; i <= softKeyCount; i++) {
-            out.add("\u952e" + i);                        // 「键2」「键3」…
+            if (i - 1 == TIMER_KEY_INDEX) {
+                out.add("\u8ba1\u65f6");                     // 「计时」：始终显示这几个字
+            } else {
+                out.add("\u952e" + i);                       // 「键2」「键4」…
+            }
         }
         return out;
     }
 
-    /** 软键 ID：第 1 格固定 9001，测试软键从 9002 起 */
+    /** 软键 ID：第 1 格固定 9001，依次 +1（计时键 = 9003） */
     public static final int SOFT_BUTTON_ID = 9001;
+
+    /** 需要高亮的软键下标：计时激活时高亮「计时」格，否则不高亮 */
+    private int highlightIndex() {
+        if (!timerActive) return -1;
+        return softKeyCount > TIMER_KEY_INDEX ? TIMER_KEY_INDEX : -1;
+    }
 
     // ---- 节流 ----
     private boolean dirty = true;
@@ -453,7 +474,7 @@ public class StateRenderer {
         s.setMediaTrack(frame.mediaTrack == null ? "" : frame.mediaTrack);
         s.setAlignment(TextAlignment.LEFT_ALIGNED);
 
-        // ★ 软键：第 1 格固定播放/暂停，后面按测试模式追加。
+        // ★ 软键：第 1 格播放/暂停，第 3 格计时，其余测试键。
         //   车机底栏共 4 格，最后一格「更多…」是车机自带的。
         try {
             java.util.List<SoftButton> keys = new java.util.ArrayList<>();
@@ -463,6 +484,8 @@ public class StateRenderer {
                 b.setText(frame.softKeys[i]);
                 b.setSoftButtonID(SOFT_BUTTON_ID + i);
                 b.setSystemAction(SystemAction.DEFAULT_ACTION);
+                // 计时激活时把「计时」格高亮（车机画成选中态）
+                b.setIsHighlighted(i == frame.highlightIndex);
                 keys.add(b);
             }
             s.setSoftButtons(keys);
@@ -588,9 +611,11 @@ public class StateRenderer {
         // ★ 第 3 行右侧：计时器「指令」，不是算好的读数
         f.clock = currentClockInstruction();
 
-        // ★ 底栏软键（第 1 格播放/暂停，其余是测试键）
+        // ★ 底栏软键（第 1 格播放/暂停，第 3 格计时，其余是测试键）
         java.util.List<String> keys = getSoftKeyTexts();
         f.softKeys = keys.toArray(new String[0]);
+        // ★ 计时激活时高亮「计时」格（车机画成选中态）
+        f.highlightIndex = highlightIndex();
 
         return f;
     }

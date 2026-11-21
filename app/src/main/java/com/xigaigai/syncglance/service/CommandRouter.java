@@ -37,6 +37,8 @@ public final class CommandRouter {
     public static final int CMD_SOFT_PLAY_PAUSE = 9001;
     /** 软键 ID，必须和 Show.softButtons 里设的一致 */
     public static final int SOFT_BTN_PLAY_PAUSE = 9001;
+    /** 第 3 格「计时」键（StateRenderer.SOFT_BUTTON_ID + 2） */
+    public static final int SOFT_BTN_TIMER = 9003;
 
     // ---- 计时 ----
     public static final int CMD_TIMER_UP = 3001;
@@ -125,8 +127,40 @@ public final class CommandRouter {
             case SOFT_BTN_PLAY_PAUSE:
                 handle(svc, CMD_SOFT_PLAY_PAUSE);
                 break;
+            case SOFT_BTN_TIMER:
+                handleTimerKey(svc);
+                break;
             default:
                 Log2.w(TAG, "软键 id=" + id + " 未绑定");
+        }
+    }
+
+    /**
+     * 第 3 格「计时」键：一次按键走一步，三态循环。
+     *
+     * <pre>
+     *   未激活  --点-->  正计时开始
+     *   走秒中  --点-->  暂停（定格）
+     *   暂停中  --点-->  清零
+     *   清零后  --点-->  又开始正计时   ← 回到第一态，循环成立
+     * </pre>
+     *
+     * 注意它同时管着倒计时：如果你先在 App 里开了 5 分钟倒计时，
+     * 按这个键一样是"先暂停、再清零"，语义一致。
+     */
+    private static void handleTimerKey(SdlService svc) {
+        com.xigaigai.syncglance.display.StateRenderer r = svc.getRenderer();
+        if (r == null) return;
+
+        if (!r.isTimerActive()) {
+            Log2.i(TAG, "计时键：开始正计时");
+            svc.doTimer(0, 0, 0, "COUNTUP");
+        } else if (r.isTimerRunning()) {
+            Log2.i(TAG, "计时键：暂停");
+            svc.doTimer(0, 0, 0, "PAUSE");
+        } else {
+            Log2.i(TAG, "计时键：清零");
+            svc.doTimer(0, 0, 0, "CLEAR");
         }
     }
 

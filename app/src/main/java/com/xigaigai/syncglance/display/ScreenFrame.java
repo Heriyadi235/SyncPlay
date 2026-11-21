@@ -40,12 +40,21 @@ public final class ScreenFrame {
     /** 底栏我们下发的软键文字（第 4 格「更多…」由车机自带，不在这里） */
     public String[] softKeys = new String[0];
 
+    /**
+     * 需要高亮的软键下标（-1 = 都不高亮）。
+     *
+     * 对应 SDL 的 {@code SoftButton.setIsHighlighted(true)} —— 车机会把那格画成选中态。
+     * 目前只用来标「计时」键：计时激活时高亮，清零后取消。
+     */
+    public int highlightIndex = -1;
+
     /** HMI 是否 FULL（决定标题栏是否标注「未连接」） */
     public boolean connected;
 
     /** 内容指纹，用于「内容没变就不重发 Show」 */
     public String stamp() {
         return stateLabel + "|" + f1 + "|" + f2 + "|" + f3 + "|" + f4 + "|" + mediaTrack
-                + "|sk=" + java.util.Arrays.toString(softKeys);
+                + "|sk=" + java.util.Arrays.toString(softKeys)
+                + "|hl=" + highlightIndex;
     }
 }

@@ -187,23 +187,26 @@ public class ScreenPreviewView {
      *   · 我们发的软键（Show.softButtons）从左往右占位
      *   · 第 4 格固定是车机自带的「更多…」
      *   · 我们的软键占满 4 格时，「更多…」会被挤掉（按实车见到的样子画）
+     *   · {@link ScreenFrame#highlightIndex} 指向的那格画成高亮（车机选中态）
      */
     private void renderSoftKeys(String[] keys) {
         final int used = 0xFFFFFFFF;      // 有内容的软键：白色
         final int empty = 0xFF5A7A9A;     // 空格子：暗蓝
         final int moreColor = 0xFFFFFFFF; // 「更多…」：车机自带
+        final int highlight = 0xFFFFD24A; // 高亮（选中）态：仪表盘那种琥珀色
 
         final TextView[] s1 = {tvS1A, tvS1B, tvS1C, tvS1D};
         final TextView[] s2 = {tvS2A, tvS2B, tvS2C, tvS2D};
 
         int n = keys == null ? 0 : keys.length;
+        int hl = frame == null ? -1 : frame.highlightIndex;
 
         for (int i = 0; i < 4; i++) {
             String text;
             int color;
             if (i < n) {
                 text = keys[i];
-                color = used;
+                color = (i == hl) ? highlight : used;
             } else if (i == 3 && n < 4) {
                 text = "更多…";
                 color = moreColor;

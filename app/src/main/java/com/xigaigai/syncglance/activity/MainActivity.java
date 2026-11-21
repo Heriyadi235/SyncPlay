@@ -94,17 +94,19 @@ public class MainActivity extends AppCompatActivity {
 
         // ---- 其他 ----
         // 软键测试：循环 1 → 2 → … → SOFT_KEY_MAX，用来探测车机真实能力。
-        //   1 个 = 正常工作状态（只有播放/暂停）
-        //   2 个以上 = 往后面几格塞「键2」「键3」… 看车机最多认几个、要不要翻页
+        //   3 个 = 正常工作状态（播放/暂停 + 测试键 + 计时）
+        //   少于 3 个时「计时」键会消失；多于 3 个时第 4 格起是「键4」「键5」…
         findViewById(R.id.btnSoftButton).setOnClickListener(v -> {
             SdlService s = SdlService.getInstance();
             if (s == null || s.getRenderer() == null) { toast("服务未启动"); return; }
             int n = s.getRenderer().getSoftKeyCount() + 1;
-            if (n > StateRenderer.SOFT_KEY_MAX) n = 1;
+            if (n > StateRenderer.SOFT_KEY_MAX) n = StateRenderer.SOFT_KEY_DEFAULT;
             s.getRenderer().setSoftKeyCount(n);
             updateSoftButtonLabel(n);
-            if (n == 1) {
-                toast("软键恢复为 1 个（仅播放/暂停）");
+            if (n < StateRenderer.SOFT_KEY_DEFAULT) {
+                toast("软键只发 " + n + " 个（计时键会被挤掉）");
+            } else if (n == StateRenderer.SOFT_KEY_DEFAULT) {
+                toast("软键恢复为 3 个（播放/暂停 · 测试 · 计时）");
             } else {
                 toast("已发送 " + n + " 个软键，看车机画几个、要不要翻页");
             }
@@ -401,7 +403,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateSoftButtonLabel(int n) {
         if (softBtn != null) {
-            softBtn.setText(n <= 1 ? "软键测试：1 个" : "软键测试：" + n + " 个");
+            softBtn.setText("软键测试：" + n + " 个");
         }
     }
 
