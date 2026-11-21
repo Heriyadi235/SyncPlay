@@ -146,9 +146,11 @@ public class StateRenderer {
         out.add(getSoftKey1());
         for (int i = 2; i <= softKeyCount; i++) {
             if (i - 1 == TIMER_KEY_INDEX) {
-                out.add("\u8ba1\u65f6");                     // 「计时」：始终显示这几个字
+                out.add("\u8ba1\u65f6");                     // 格3「计时」：始终显示这几个字
+            } else if (i == 2) {
+                out.add("-");                                // 格2 留空占位（ASCII 连字符，有字形）
             } else {
-                out.add("\u952e" + i);                       // 「键2」「键4」…
+                out.add("\u952e" + i);                       // 「键4」「键5」…
             }
         }
         return out;
