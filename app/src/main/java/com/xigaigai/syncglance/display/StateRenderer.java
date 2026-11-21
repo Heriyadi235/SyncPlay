@@ -100,18 +100,29 @@ public class StateRenderer {
      * 这里放到 12，用来摸车机到底能注册多少个 —— 超出上限时车机会
      * 回 INVALID_DATA 或直接截断，试出来再收窄。
      */
-    public static final int SOFT_KEY_MAX = 12;
+    /**
+     * 软键数量上限：**8 个**（车机实测上限，见 AGENTS.md 6.4）。
+     * 超过 8 个车机自己会翻页/截断，没必要再往上试。
+     */
+    public static final int SOFT_KEY_MAX = 8;
 
-    private volatile int softKeyCount = SOFT_KEY_DEFAULT;
-
-    /** 默认软键数：播放/暂停、测试键、计时 */
+    /** 基础软键数：播放/暂停、占位 -、计时。**不能少于这个数** */
     public static final int SOFT_KEY_DEFAULT = 3;
 
     /** 第 3 格固定是「计时」键（下标 2） */
     public static final int TIMER_KEY_INDEX = 2;
 
+    private volatile int softKeyCount = SOFT_KEY_DEFAULT;
+
+    /**
+     * 设置软键数量。
+     *
+     * ★ <b>下限锁死在 3</b>：格1 播放/暂停、格2 占位、格3 计时 都是有正常功能的，
+     *   「软键测试」只能把测试键<b>追加在后面</b>，不能把它们挤掉。
+     *   （以前下限是 1，调到 1 个时计时键就没了，等于测试侵犯了正常功能。）
+     */
     public void setSoftKeyCount(int n) {
-        this.softKeyCount = Math.max(1, Math.min(SOFT_KEY_MAX, n));
+        this.softKeyCount = Math.max(SOFT_KEY_DEFAULT, Math.min(SOFT_KEY_MAX, n));
         Log2.i(TAG, "软键数量：" + softKeyCount);
         markDirty("softKeyCount");
     }

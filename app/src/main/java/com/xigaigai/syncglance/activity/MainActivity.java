@@ -93,22 +93,28 @@ public class MainActivity extends AppCompatActivity {
         });
 
         // ---- 其他 ----
-        // 软键测试：循环 1 → 2 → … → SOFT_KEY_MAX，用来探测车机真实能力。
-        //   3 个 = 正常工作状态（播放/暂停 + 测试键 + 计时）
-        //   少于 3 个时「计时」键会消失；多于 3 个时第 4 格起是「键4」「键5」…
+        /*
+         * 软键测试：在 3 ~ 8 之间循环。
+         *
+         *   ★ 下限是 3 —— 格1 播放/暂停、格2 占位 -、格3 计时 都是正常功能，
+         *     测试键只能追加在后面，不能把它们挤掉。
+         *     （以前下限是 1，调到 1 个时计时键就消失了。）
+         *   ★ 上限是 8 —— 车机最多认 8 个（AGENTS.md 6.4）。
+         */
         findViewById(R.id.btnSoftButton).setOnClickListener(v -> {
-            SdlService s = SdlService.getInstance();
-            if (s == null || s.getRenderer() == null) { toast("服务未启动"); return; }
-            int n = s.getRenderer().getSoftKeyCount() + 1;
+            // ★ 走 SyncPlayCore 而不是 SdlService 实例：软键数量是本地状态，
+            //   服务按官方语义「断开就 stopSelf」，平时不存在，走 getInstance() 会一直
+            //   提示「服务未启动」，等于这个按钮失效。
+            StateRenderer r = SyncPlayCore.get().renderer();
+            if (r == null) { toast("渲染器未就绪"); return; }
+            int n = r.getSoftKeyCount() + 1;
             if (n > StateRenderer.SOFT_KEY_MAX) n = StateRenderer.SOFT_KEY_DEFAULT;
-            s.getRenderer().setSoftKeyCount(n);
+            r.setSoftKeyCount(n);
             updateSoftButtonLabel(n);
-            if (n < StateRenderer.SOFT_KEY_DEFAULT) {
-                toast("软键只发 " + n + " 个（计时键会被挤掉）");
-            } else if (n == StateRenderer.SOFT_KEY_DEFAULT) {
-                toast("软键恢复为 3 个（播放/暂停 · 测试 · 计时）");
+            if (n == StateRenderer.SOFT_KEY_DEFAULT) {
+                toast("软键回到 3 个（播放 · - · 计时）");
             } else {
-                toast("已发送 " + n + " 个软键，看车机画几个、要不要翻页");
+                toast("软键 " + n + " 个：测试键追加在计时后面，看车机怎么翻页");
             }
         });
         findViewById(R.id.btnNavMode).setOnClickListener(v -> toggleNavMode());
