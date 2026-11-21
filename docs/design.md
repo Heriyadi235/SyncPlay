@@ -546,16 +546,26 @@ App 进程被系统杀掉、或车机重新扫描应用时，车机能凭这个 
 本车实测语言是 `ZH-CN`。硬编码会在车机语言被切换时直接注册失败。
 Ford 自家 `Sync Destinations` 也是留空。
 
-### 5.4 蓝牙唤醒
+### 5.4 蓝牙唤醒（2026-11-21 修正）
 
-车机无法主动唤醒手机上的 app，所以靠系统广播拉起：
+车机无法主动唤醒手机上的 app，所以靠系统广播把进程叫起来 —— **但只叫进程，
+不建连接**。
 
 | 事件 | 动作 |
 |---|---|
-| `ACL_CONNECTED`（目标设备） | 启动服务 + **强制重建 proxy** |
-| `BOOT_COMPLETED` | 启动服务 |
-| 蓝牙 `STATE_ON` | 启动服务 |
-| `MY_PACKAGE_REPLACED` | 启动服务 + 强制重建 |
+| `ACL_CONNECTED`（目标设备） | `queryForConnectedService` 探测（**不建连接**） |
+| `BOOT_COMPLETED` | 同上 |
+| 蓝牙 `STATE_ON` | 同上 |
+| `MY_PACKAGE_REPLACED` | 同上 |
+
+> **⚠ 不要在这些广播里 `startForegroundService(SdlService)`。**
+> 那是 4.12.2 时代的做法，搬进 5.x 之后**必败**：
+> `SdlService.onCreate` 会立刻 `SdlManager.start()`，而此刻库还没把 Router 叫起来
+> —— 库走异步（约 110ms），我们只要 5~20ms，于是必然在 Router 还没 listen 时
+> 去 bind → 5~11ms 自毁 → 车机卡「正在连接」**2 分钟**。
+>
+> 真正的启动入口只有一个：`SdlReceiver.onSdlEnabled`（车机已连通 Router 之后）。
+> 完整证据见 [连接可靠性排查.md](连接可靠性排查.md)。
 
 #### 5.4.1 设备过滤
 
@@ -712,7 +722,7 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | Service 声明 `exported="true"`、`enabled="true"`、`foregroundServiceType="connectedDevice"` | ✅ 已补齐 | 原先 `exported="false"`；应用在后台时 Router 可能拉不起服务 |
 | `onCreate` 里建通知渠道 + `startForeground` | ✅ | 渠道 `syncglance`，`IMPORTANCE_LOW` |
 | **`onDestroy` 里 `stopForeground`，不要留通知** | ✅ 已补 | 官方原话："don't leave your notification in the notification tray" |
-| `onStartCommand` 里建 `SdlManager`，返回 `START_STICKY` | ✅（更细） | 官方判 `sdlManager == null`；我们按 `lifecycle` 状态判 `needRebuild()`，修过「蓝牙断开后手动开 App 监听死掉」 |
+| `onStartCommand` 里建 `SdlManager`，返回 `START_STICKY` | ✅ | 官方在 `onStartCommand` 里建；我们在外面套了 `needRebuild()`（已连接就复用）。**但这只在 `onSdlEnabled` 拉起服务时才有意义** —— 从系统广播直接启动会在 Router 就绪前抢跑，见 §5.4 |
 | `MultiplexTransportConfig` 作为传输 | ✅ | 官方示例多传 `FLAG_MULTI_SECURITY_OFF`；我们用默认安全等级（实车能连，不擅自放宽） |
 | `setAppTypes([MEDIA])` | ✅ | 决定车机把它归到「媒体 / 音频」 |
 | `setShortAppName` | ✅ | 车机列表里用短名 |

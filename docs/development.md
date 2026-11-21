@@ -1550,13 +1550,21 @@ Unicode 把所有文字统一到一个码位空间，但**车机字库是按某�
    | `USB_ACCESSORY_ATTACHED` | USB 传输（本车用不到） |
 
 3. **`queryForConnectedService()`** —— 官方给的「应用后启动」补连接手段。
-   `SdlService.onStartCommand` 里每个进程生命周期调一次：
+   现在挂在 `SyncGlanceApp.onCreate`（每个进程一次，失败 2 秒后重试）、
+   `MainActivity.onCreate`，以及 `BootReceiver` 的四个系统广播里。
    上车时应用不在 → 车机放弃 → 用户后来才打开应用，这一问能让 RouterService
    重新挂起来。官方也注明：**车机端还得重新做一次 SDP 查询**才感知得到，这一步不受应用控制。
 
-4. **`BootReceiver` 的 `ACL_CONNECTED` 不再 `forceReset`**。
-   连接交给官方链路，此刻车机还没连 SDL，强制 dispose 重建只会在 RouterService
-   尚未就绪时抢跑，反而更容易失败。是否重建交给 `needRebuild()` 判断。
+4. **`BootReceiver` 只探测，不启动服务**（2026-11-21 修正，提交 `fcbef0a`）。
+   以前这里是 `startForegroundService(SdlService)`，注释写的是「只保证进程活着」。
+   那是 4.x 的语义：`SdlProxyALM` 会自己等 Router。
+   **在 5.x 里这行代码的实际效果是立刻建一条 `SdlManager` 连接** —— 而那一刻
+   Router 还没被库叫起来（库走异步约 110ms，我们只要 5~20ms），于是 5~11ms 自毁，
+   车机侧看到「app 在但注册不完成」，卡在「正在连接」**2 分钟**才超时。
+
+   实车四轮验证（2026-11-21 15:13~15:17）：从 `ACL_CONNECTED` / `BOOT_COMPLETED`
+   启动 `SdlService` **全部失败**，只有 `SdlReceiver.onSdlEnabled`（车机已连通 Router）
+   那条成功。详见 [连接可靠性排查.md](连接可靠性排查.md)。
 
 > 曾经写过一版"20 秒没连上就 resetProxy 重试两次"的看门狗，已废弃 ——
 > 那是绕开官方机制硬拉，治标不治本。
