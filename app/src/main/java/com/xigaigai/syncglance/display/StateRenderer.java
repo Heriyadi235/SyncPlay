@@ -702,10 +702,18 @@ public class StateRenderer {
          *    改成两步法（COUNTUP 起表 + PAUSE 停住）就能正常显示，兜底已删除。
          */
 
-        // ★ 计时器占用时钟格时，track 前加 §（其他状态不加，见 statusPrefix 注释）
-        if (f.mediaTrack != null && !f.mediaTrack.isEmpty()) {
-            f.mediaTrack = statusPrefix() + f.mediaTrack;
-        }
+        /*
+         * ★ track 行不再加任何状态指示符。
+         *
+         *   以前计时器占用时钟格时会在 track 前加一个 `§`（见下文 statusPrefix 的
+         *   注释），用来让用户判断"那一格现在显示的是计时器还是别的东西"。
+         *   但自从底栏第 3 格做成「计时」键、并且**计时激活时该键会高亮**之后，
+         *   这个信息已经由软键高亮表达出来了 —— 两个信号重复，还白占 track 的
+         *   8 字符宽度。所以移除。
+         *
+         *   ⚠ 不要因为"看着空"又把符号加回来：车机字库对箭头/三角/播放符
+         *     一律渲染成圆点（AGENTS.md 6.8），加了反而是噪点。
+         */
 
         // ★ 第 3 行右侧：计时器「指令」，不是算好的读数
         f.clock = currentClockInstruction();
@@ -1313,19 +1321,17 @@ public class StateRenderer {
         }
     }
 
-    /**
-     * track 行前面的状态指示符。
+    /*
+     * 这里曾经有 statusPrefix()：计时器占用时钟格时在 track 前加 `§`（U+00A7），
+     * 让用户能判断那一格现在显示的是计时器还是别的东西。
      *
-     * <b>只用一个字符：{@code §}（U+00A7）</b>，而且**只在计时器占用媒体时钟格时**出现。
+     * 已移除。原因：底栏第 3 格「计时」键在计时激活时会**高亮**
+     * （SoftButton.setIsHighlighted），那个信号更直观，也已经在两屏都可见；
+     * 再挂一个 § 属于重复表达，还白占 track 的 8 字符宽度。
      *
-     * 为什么不用别的：实车逐组测过（见 AGENTS.md 6.8），箭头 / 三角 / 播放暂停符
-     * 车机一律渲染成一个圆点，只有 Latin-1 那批排版符号有字形 —— `§` 正在其中。
-     * 其他状态（导航 / 歌曲）干脆不加，避免出现满屏圆点。
+     * 注意：Glyphs.ENABLED 仍然是 false，箭头/沙漏那套符号不要重新打开 ——
+     * 车机对它们一律渲染成圆点（AGENTS.md 6.8）。
      */
-    private String statusPrefix() {
-        return timerActive ? "\u00a7" : "";
-    }
-
     /**
      * 计时器激活时的符号：沙漏。
      *
