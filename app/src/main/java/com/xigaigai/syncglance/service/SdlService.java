@@ -174,6 +174,15 @@ public class SdlService extends Service {
     private volatile boolean routerAlive = false;
 
     /**
+     * 本次建连的起始时刻（{@code SystemClock.elapsedRealtime()}），0 = 还没建。
+     *
+     * 用途：2026-11-21 实车出现过「onSdlEnabled → 服务创建 → 58~115ms 就自毁」，
+     * 但当时手上没有足够信息判断是 Router 没就绪、Router 中途重启，还是车机踢线。
+     * 在 {@link #handleConnectionClosed()} 里把这个差值打出来，下次就能区分。
+     */
+    private long proxyStartedAt = 0;
+
+    /**
      * 这次进程起来之后，是否"连上过又断开了"。
      *
      * 用途：区分 {@code 未连接（连接关闭）} 和 {@code 未连接（等待车机）}——
@@ -493,6 +502,7 @@ public class SdlService extends Service {
              *     4. build() 之后要调 start()，是异步的；onStart() 才是"注册完成"。
              */
             final long gen = ++generation;      // 本次连接的代际，旧 connection 的回调会被它过滤掉
+            proxyStartedAt = android.os.SystemClock.elapsedRealtime();   // 诊断用，见 handleConnectionClosed
 
             Vector<AppHMIType> appTypes = new Vector<>();
             appTypes.add(AppHMIType.MEDIA);
@@ -1251,7 +1261,21 @@ public class SdlService extends Service {
      *   最终按用户要求改回来了）。
      */
     private void handleConnectionClosed() {
-        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），按官方语义停掉 Service");
+        /*
+         * 诊断信息（2026-11-21 加，纯日志）：实车上出现过「onSdlEnabled → 服务创建
+         * → 58~115ms 就自毁」，当时判断不了原因。这里把三个关键量打出来：
+         *
+         *   建连至今 ms  —— 几十毫秒 = 根本没握手成功；几秒 = 握手后断开
+         *   RouterAlive   —— false 说明 Router 那时不在，绑定注定失败
+         *   代际           —— 对不上说明是旧 manager 的迟到回调
+         */
+        long sinceStart = (proxyStartedAt == 0)
+                ? -1
+                : android.os.SystemClock.elapsedRealtime() - proxyStartedAt;
+        proxyStartedAt = 0;
+        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），按官方语义停掉 Service"
+                + " ［建连至今 " + sinceStart + "ms，RouterAlive=" + routerAlive
+                + "，代际=" + generation + "］");
         /*
          * 「连接关闭」只在**真的跟车机对上过话**之后才成立。
          *

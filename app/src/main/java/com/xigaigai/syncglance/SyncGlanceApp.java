@@ -61,6 +61,20 @@ public class SyncGlanceApp extends Application {
          */
         Log2.init(this);
 
+        /*
+         * ★ 崩溃兜底：把「最后几条日志 + 完整堆栈」刷进 syncplay.log，然后照常崩。
+         *
+         *   为什么要这个：2026-11-21 18:31 / 18:33 两次闪退，
+         *   落盘日志里只剩一行不带堆栈的 getMessage()（还是 null），
+         *   最后是靠电脑旁的 `adb logcat -b crash` 才看到
+         *   ReceiverCallNotAllowedException。
+         *   **而车里没有 adb** —— 那就是说，下次闪退大概率连证据都拿不到。
+         *
+         *   注意：这里<b>不吞异常</b>，处理完照常交给系统原来的 handler，
+         *   进程该崩还是崩。我们只要证据，不用它掩盖 bug。
+         */
+        installCrashLogger();
+
         if (!isMainProcess()) return;
 
         SyncPlayCore.get().init(this);
@@ -81,6 +95,26 @@ public class SyncGlanceApp extends Application {
             Log2.i(TAG, "补连接首次失败，2 秒后重试一次");
             SdlReceiver.pokeIfBluetoothConnected(this);
         }, 2000);
+    }
+
+    /**
+     * 记录未捕获异常，但不改变"崩溃"这个结果。
+     *
+     * <p>顺序很关键：先写日志（带堆栈）→ `flushNow()` 强制落盘 → 交回原来的 handler。
+     * 任何一步抛异常都必须吞掉，否则兜底代码自己变成新的崩溃源。</p>
+     */
+    private void installCrashLogger() {
+        final Thread.UncaughtExceptionHandler prev =
+                Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            try {
+                Log2.e("Crash", "未捕获异常，线程=" + (t == null ? "?" : t.getName()), e);
+                Log2.flushNow();
+            } catch (Throwable ignored) {
+                // 兜底失败也不能影响真正的崩溃流程
+            }
+            if (prev != null) prev.uncaughtException(t, e);
+        });
     }
 
     /**

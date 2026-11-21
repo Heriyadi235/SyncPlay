@@ -8,22 +8,29 @@ import android.content.Intent;
 import com.xigaigai.syncglance.util.Log2;
 
 /**
- * 蓝牙/开机事件 → <b>探测</b>有没有已连接的车机。
+ * 蓝牙/开机事件 → <b>只记日志</b>（不建连接，也不调探测 API）。
  *
- * <h3>它不负责启动 SDL 连接（2026-11-21 修正）</h3>
+ * <h3>它不负责连接，也不负责探测（2026-11-21 修正）</h3>
  *
- * 原来这里写的是「靠这些系统事件把服务重新拉起来」，那是 4.12.2 时代的做法：
- * 官方 5.x 把「唤醒 RouterService → 等车机连上 → 回调 {@code onSdlEnabled}」
- * 整条链路收进了 {@code SdlBroadcastReceiver}，应用层不该再去建连接。
+ * 这个类两度踩雷，两样都被拿掉了：
  *
- * <p>实车结论：从这些广播直接 {@code startForegroundService(SdlService)}
- * 会让 {@code SdlManager} 在 Router 就绪之前抢跑，5~11ms 就自毁，
- * 车机侧则卡在「正在连接」直到 2 分钟超时。</p>
+ * <ol>
+ *   <li><b>不启动服务</b>。原来这里 {@code startForegroundService(SdlService)}，
+ *       那是 4.12.2 的做法。5.x 里它等于立刻建一条 {@code SdlManager} 连接，
+ *       而库要 ~110ms 才把 Router 叫起来 → 5~11ms 自毁 →
+ *       车机卡「正在连接」2 分钟（修复提交 `fcbef0a`）。</li>
+ *   <li><b>也不调 {@code queryForConnectedService}</b>。
+ *       广播的 context 是 {@code ReceiverRestrictedContext}，库会拿它去
+ *       {@code bindService} → {@code ReceiverCallNotAllowedException} →
+ *       **进程闪退**（2026-11-21 18:31 / 18:33 实车各一次）。</li>
+ * </ol>
  *
- * <p>所以现在四个事件都只调官方 {@code queryForConnectedService}，
- * 真正的连接由 {@link SdlReceiver#onSdlEnabled} 那一条链路负责。</p>
+ * <p>探测改由 {@link com.xigaigai.syncglance.SyncGlanceApp#onCreate} 和
+ * {@code MainActivity.onCreate} 承担 —— 那里是 Application / Activity 的
+ * context，调同一个 API 是安全的。连接本身则由
+ * {@link SdlReceiver#onSdlEnabled} 那一条官方链路负责。</p>
  *
- * <p>本类仍然保留的价值：</p>
+ * <p>所以本类现在的唯一价值：</p>
  * <ul>
  *   <li>蓝牙设备白名单判断（只认真车机，忽略耳机音箱）</li>
  *   <li>把「启动来源」写进日志，排查时能看出来是谁叫醒的应用</li>
@@ -42,8 +49,14 @@ public class BootReceiver extends BroadcastReceiver {
 
         switch (action) {
             case Intent.ACTION_BOOT_COMPLETED:
+                /*
+                 * 只记日志，不做任何连接动作。
+                 *
+                 * 进程是被这条广播拉起来的 → SyncGlanceApp.onCreate 必然先跑，
+                 * 它已经用 Application context 探测过了。
+                 * 这里再探测一次不但多余，还**会闪退** —— 原因见下面 ACL_CONNECTED 的注释。
+                 */
                 Log2.i(TAG, "【启动来源】系统开机");
-                poke(context);
                 break;
 
             case "android.bluetooth.device.action.ACL_CONNECTED": {
@@ -60,18 +73,46 @@ public class BootReceiver extends BroadcastReceiver {
                 Log2.i(TAG, "【启动来源】蓝牙 ACL_CONNECTED ← " + name + " / " + addr);
                 dumpKnownDevices(context);
                 /*
-                 * ★ 这里只探测，**绝不直接启动 SdlService**（2026-11-21 实车结论）。
+                 * ★ 这里什么都不做，只记日志和白名单。
                  *
-                 *   以前这里写的是「只保证进程活着」，但在 5.x 上
-                 *   startForegroundService(SdlService) 的实际效果是
-                 *   onCreate → startProxy() → SdlManager.start()，
-                 *   **不是保活，是立刻建一条连接**。详见 poke() 的注释。
+                 * <h3>① 绝不 startForegroundService(SdlService)</h3>
+                 * 那是 4.12.2 的做法。在 5.x 上它的实际效果不是「保活」，
+                 * 而是立刻 `onCreate → startProxy() → SdlManager.start()`。
+                 * 而此刻库还没把 Router 叫起来（库走异步约 110ms，我们只要 5~20ms），
+                 * 于是必然在 Router 还没 listen 时去 bind → 5~11ms 自毁 →
+                 * 车机卡「正在连接」**2 分钟**。
+                 * （2026-11-21 四轮实车，修复提交 `fcbef0a`）
                  *
-                 *   4.x 时代这么写能work（SdlProxyALM 会自己等 Router），
-                 *   5.x 的 SdlManager 不等 —— 抢跑必败。
+                 * <h3>② 也绝不在这里调 queryForConnectedService</h3>
+                 * BroadcastReceiver 拿到的 `context` 是
+                 * **`ReceiverRestrictedContext`**，而库内部会把它一路传到
+                 * `RouterServiceValidator.createTrustedListRequest`
+                 * → `SdlRouterStatusProvider.checkIsConnected` → **`bindService`**。
+                 * Android 明令禁止在广播里 bindService，于是：
+                 *
+                 * <pre>
+                 *   ReceiverCallNotAllowedException:
+                 *     BroadcastReceiver components are not allowed to bind to services
+                 * </pre>
+                 *
+                 * **整个进程闪退**。2026-11-21 18:31:45 和 18:33:12 各崩一次，
+                 * 都是「车机已连上 Router 之后再次上车」的场景
+                 * （Router 在跑 → ServiceFinder 能找到 → 才会走 bindService 校验）。
+                 * 用 Application / Activity 的 context 调同一个 API 不会崩 ——
+                 * 差别只是 context 的包装类型。
+                 *
+                 * <h3>那连接靠谁</h3>
+                 * 全靠 SDL 官方链路：
+                 * <pre>
+                 *   库的 SdlBroadcastReceiver.onReceive(ACL_CONNECTED)
+                 *     → wakeUpRouterService() 唤醒 Router
+                 *     → 车机连上 Router → onSdlEnabled()
+                 *     → 应用启动 SdlService
+                 * </pre>
+                 * 进程如果本来是死的、被这条广播拉起来，
+                 * {@link com.xigaigai.syncglance.SyncGlanceApp#onCreate} 也会补一次探测
+                 * （Application context，安全）。
                  */
-                Log2.i(TAG, "★ 已连接，探测车机是否已连通 Router（不自己建连接）");
-                poke(context);
                 break;
             }
 
@@ -80,8 +121,8 @@ public class BootReceiver extends BroadcastReceiver {
                 int state = intent.getIntExtra(
                         android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1);
                 if (state == android.bluetooth.BluetoothAdapter.STATE_ON) {
+                    // 只记日志：蓝牙刚打开时车机还没连，探测没有意义
                     Log2.i(TAG, "【启动来源】蓝牙已开启");
-                    poke(context);
                 }
                 break;
             }
@@ -107,8 +148,8 @@ public class BootReceiver extends BroadcastReceiver {
 
             case "android.intent.action.MY_PACKAGE_REPLACED": {
                 // 只监听自己的升级（不需要 data scheme，也不会被别的应用打扰）
+                // 只记日志：进程会被这条广播拉起，SyncGlanceApp.onCreate 会补一次探测
                 Log2.i(TAG, "【启动来源】本应用安装/升级完成");
-                poke(context);
                 break;
             }
 
@@ -264,59 +305,27 @@ public class BootReceiver extends BroadcastReceiver {
         } catch (Exception ignored) { }
     }
 
-    /**
-     * 用官方 API 探测「现在有没有已连接的车机」，**不自己建连接**。
+    /*
+     * ★ 这里曾经有一个 poke() 方法（调 queryForConnectedService），2026-11-21 删掉了。
      *
-     * <h3>为什么这里绝对不能 startForegroundService(SdlService)</h3>
+     *   它看着很合理 —— 官方 API，车机连着就被叫起来，没连就什么都不发生。
+     *   但它在这个类里**必然闪退**：
      *
-     * 这是 4.12.2 时代留下的写法，搬进 5.x 之后是<b>必败</b>的。
-     * 根源是同一个 {@code ACL_CONNECTED} 广播被两个 receiver 抢着处理，
-     * 一个异步、一个同步：
+     *     BroadcastReceiver 的 context 是 ReceiverRestrictedContext
+     *     → queryForConnectedService 把它一路传到
+     *       RouterServiceValidator.createTrustedListRequest
+     *       → SdlRouterStatusProvider.checkIsConnected
+     *       → bindService
+     *     → ReceiverCallNotAllowedException → 进程崩溃
      *
-     * <pre>
-     *   15:13:29.645  ACL_CONNECTED
-     *                 ├─ 库（异步）：SdlDeviceListener → ServiceFinder → 起 Router
-     *                 │      └─ 15:13:29.757 RouterService 上线      ← 用了 112ms
-     *                 └─ 我们（同步）：startForegroundService → SdlManager.start()
-     *                        └─ 15:13:29.664 服务创建
-     *                        └─ 15:13:29.671 连接结束（CONNECTING → 自毁，仅 7ms）
-     * </pre>
+     *   只有「Router 正在跑、ServiceFinder 找得到」时才会走到那一步，
+     *   所以表现为「首次上车没事、重新上车就闪退」
+     *   （实车 18:31:45 / 18:33:12 各一次）。
      *
-     * 我们的同步路径只要 5~20ms，库的异步路径要 ~110ms，**每次都必然跑在库前面**，
-     * 于是 {@code SdlManager} 在 Router 还没 listen 的时候就去 bind → 立刻
-     * {@code onDestroy}（连 {@code onError} 都不打）→ {@code handleConnectionClosed}
-     * → {@code stopSelf()}。
+     *   同样这个 API 在 Application / Activity 的 context 里是安全的 ——
+     *   差别只在 context 的包装类型，不在 API 本身。
+     *   所以探测一律放在 SyncGlanceApp.onCreate 和 MainActivity.onCreate 里做。
      *
-     * <h3>实车证据（2026-11-21，15:13~15:17 共四轮）</h3>
-     *
-     * 从 {@code ACL_CONNECTED} / {@code BOOT_COMPLETED} 直接启动 SdlService 的
-     * <b>全部失败</b>，自毁耗时 5 / 7 / 10 / 11ms；只有
-     * {@code SdlReceiver.onSdlEnabled} 那条（车机<b>已经</b>连通 Router）成功。
-     *
-     * 更糟的是车机侧：它看到「app 在，但注册一直不完成」，会卡在「正在连接」
-     * 直到 2 分钟超时再退回主界面 —— 15:16:19 那条
-     * {@code 连接结束（原状态 CONNECTING）} 就是这个超时。
-     *
-     * <h3>官方怎么做</h3>
-     *
-     * 5.x 把「唤醒 Router」整个收进了 {@code SdlBroadcastReceiver.onReceive}：
-     * <pre>
-     *   ACL_CONNECTED → wakeUpRouterService(...)   // 只起 Router，不碰应用服务
-     *   车机连上 Router → sdl.router.startservice → onSdlEnabled(...)  // 这才轮到应用
-     * </pre>
-     * （反编译 sdl_android 5.8.0 的 {@code SdlBroadcastReceiver} 确认：
-     * {@code onSdlEnabled} 是应用唯一的启动时机。）
-     *
-     * <p>所以这里只调 {@link SdlReceiver#pokeIfBluetoothConnected(Context)}
-     * （官方 {@code queryForConnectedService}）：车机真连着就会被叫起来，
-     * 没连就什么都不发生 —— 天然不会抢跑。</p>
-     *
-     * <p>⚠ 顺带修掉另一个坑：国内 ROM 会在应用被杀后<b>重发假的
-     * {@code BOOT_COMPLETED}</b>（实车 15:14:57 / 15:15:17 / 15:15:52 连发三次，
-     * 而手机 uptime 已 6.2 天）。以前每来一次就建一个收不到任何回应的
-     * {@code SdlManager} 僵尸，现在最多触发一次无害的查询。</p>
+     *   完整堆栈与分析见 docs/连接可靠性排查.md。
      */
-    private void poke(Context ctx) {
-        SdlReceiver.pokeIfBluetoothConnected(ctx);
-    }
 }

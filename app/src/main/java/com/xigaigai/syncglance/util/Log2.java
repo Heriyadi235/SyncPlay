@@ -189,8 +189,47 @@ public final class Log2 {
 
     public static void e(String tag, String msg, Throwable t) {
         Log.e("SyncGlance", "[" + tag + "] " + msg, t);
-        emit(tag, "✗ " + msg + " : " + (t == null ? "" : t.getMessage()));
+        /*
+         * ★ 异常必须连堆栈一起落盘（2026-11-21 修）。
+         *
+         *   以前这里只写 t.getMessage()，结果 18:33 那次
+         *   ReceiverCallNotAllowedException 在落盘日志里只剩一行
+         *   「Error receiving broadcast ... : null」——
+         *   getMessage() 为 null，堆栈全丢，只能靠 logcat 的 crash 缓冲救回来。
+         *   而车里根本没有 adb。所以这里把堆栈也写进文件。
+         */
+        String trace = stackTraceOf(t);
+        emit(tag, "✗ " + msg + " : " + (t == null ? "" : t.getMessage())
+                + (trace.isEmpty() ? "" : "\n" + trace));
     }
+
+    /** 取异常堆栈文本（最多 40 行，防止一次崩溃把 200KB 的日志文件撑爆） */
+    private static String stackTraceOf(Throwable t) {
+        if (t == null) return "";
+        try {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            java.io.PrintWriter pw = new java.io.PrintWriter(sw);
+            t.printStackTrace(pw);
+            pw.flush();
+            String[] lines = sw.toString().replace("\r", "").split("\n");
+            StringBuilder sb = new StringBuilder();
+            int n = 0;
+            for (String line : lines) {
+                if (n >= MAX_TRACE_LINES) {
+                    sb.append("    ... 省略 ").append(lines.length - MAX_TRACE_LINES).append(" 行");
+                    break;
+                }
+                if (n > 0) sb.append('\n');
+                sb.append("    ").append(line);
+                n++;
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static final int MAX_TRACE_LINES = 40;
 
     private static void emit(String tag, String msg) {
         final String ui = TS_UI.format(new Date()) + "  " + msg;
