@@ -153,7 +153,24 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        startSdlService();
+        /*
+         * ★ 不在 Activity 里建连接，只做官方探测（2026-11-21 实车修正）。
+         *
+         *   以前这里是 startSdlService() —— 直接 startForegroundService
+         *   → SdlService.onCreate → SdlManager.start()。两个问题：
+         *     1. 打开 App 时车机往往还没连 Router，SdlManager 会在 5~11ms 内自毁；
+         *     2. 车机真连着的时候，onSdlEnabled 那条官方链路本来就会把服务叫起来，
+         *        这次启动纯属多余。
+         *
+         *   官方 hello_sdl 的 Activity 里也只调 queryForConnectedService：
+         *   车机真连着 → 库回调 onSdlEnabled → 启动服务；没连 → 什么都不发生。
+         *
+         *   与 SyncGlanceApp.onCreate 的那次探测互补：那次跑得极早，
+         *   蓝牙/库可能还没就绪，这里是界面真正可见时的第二次确认。
+         */
+        if (!com.xigaigai.syncglance.receiver.SdlReceiver.pokeIfBluetoothConnected(this)) {
+            Log2.w("UI", "探测已连接车机失败（不影响后续 ACL_CONNECTED 链路）");
+        }
 
         /*
          * 状态刷新的心跳改到 onResume 里启动（见那里的注释）。
@@ -487,15 +504,16 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------------- 服务 ----------------
 
-    private void startSdlService() {
-        try {
-            Intent i = new Intent(this, SdlService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i);
-            else startService(i);
-        } catch (Exception e) {
-            Log2.e("UI", "启动服务失败", e);
-        }
-    }
+    /*
+     * ★ 这里曾经有一个 startSdlService()（直接 startForegroundService）。
+     *
+     *   2026-11-21 按「连接生命周期完全对齐 SDL 5.x 官方」的要求删掉了：
+     *   应用只在 SdlReceiver.onSdlEnabled（车机已连通 Router）时启动 SdlService，
+     *   其他地方一律只 queryForConnectedService 探测。
+     *
+     *   要不要恢复它，先看 docs/连接可靠性排查.md 里的实车证据：
+     *   从 Activity / 广播直接建 SdlManager 这条路，实测 5~11ms 就自毁。
+     */
 
     @Override
     protected void onResume() {
