@@ -56,31 +56,40 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     /**
      * 车机已经连上 RouterService，把 SDL 服务拉起来建 proxy。
      *
-     * <h3>启动方式（官方 Integration Basics - Java 的分级写法）</h3>
+     * <h3>为什么两条路都要走（不再二选一）</h3>
      *
-     * <ol>
-     *   <li><b>Android 12 (S) 及以上</b>：从 intent 里取
-     *       {@code TransportConstants.PENDING_INTENT_EXTRA}，用
-     *       {@code pendingIntent.send(context, 0, intent)} 启动。
-     *       这是官方推荐做法 —— 绕开「后台启动前台服务」的限制，
-     *       不需要我们把 SdlService 暴露给谁直接 start。</li>
-     *   <li><b>Android O ~ R，以及拿不到 PendingIntent 的情况</b>：
-     *       {@code context.startForegroundService(intent)}。</li>
-     *   <li><b>Android O 以下</b>：{@code context.startService(intent)}。</li>
-     * </ol>
+     * 官方 Integration Basics 给的写法是「有 PendingIntent 就发它，否则自己 start」。
+     * 我们照抄后出过事（2026-11-21 实车日志）：
      *
-     * ★ 以前只实现了第 2、3 种。车机连上时如果应用在后台，
-     *   Router 想拉起我们可能被系统拒绝（后台启动前台服务受限）——
-     *   本机暂时没复现，但这是官方推荐路径，补齐更稳。
+     * <pre>
+     *   12:49:37.867  [SdlReceiver] ★ onSdlEnabled —— 车机已连通 RouterService
+     *   12:49:37.873  [SdlReceiver] 已通过 PendingIntent 启动 SdlService
+     *   （之后没有任何 [SYNC] SyncPlay 服务创建）
+     *   12:50:11.415  [Boot] ACL_DISCONNECTED      ← 车机等不及，超时
+     * </pre>
+     *
+     * {@code pendingIntent.send()} 返回成功（没抛 CanceledException），但它启动的
+     * <b>不是我们的 SdlService</b>（onCreate 压根没执行），而代码又提前 return 了，
+     * 把可靠的那条路跳过 —— 车机连上 Router 后没人完成 RAI，最后超时。
+     *
+     * <p>所以现在改成<b>两条都走</b>：自己 start 保证能起来，PendingIntent 作为
+     * 官方推荐的补充路径（用于系统对后台启动前台服务有限制的场景）。
+     * Service 重复启动是幂等的：{@code onStartCommand} 里 needRebuild() 会判断
+     * 「已连接就复用」，不会重复建 SdlManager。</p>
      */
     @Override
     public void onSdlEnabled(Context context, Intent intent) {
         Log2.i(TAG, "★ onSdlEnabled —— 车机已连通 RouterService，启动 SdlService");
 
-        // ① 官方 Android 12+ 路径：用 Router 递过来的 PendingIntent 启动
-        if (startViaPendingIntent(context, intent)) return;
+        // ① 可靠路径：自己拉起来
+        startSelf(context, intent);
 
-        // ② 退路：自己 startForegroundService / startService
+        // ② 官方 Android 12+ 路径：再发一次 Router 递过来的 PendingIntent（尽力而为）
+        startViaPendingIntent(context, intent);
+    }
+
+    /** 自己 startForegroundService / startService */
+    private void startSelf(Context context, Intent intent) {
         try {
             Intent i = new Intent(context, SdlService.class);
             if (intent != null) {
@@ -93,8 +102,9 @@ public class SdlReceiver extends SdlBroadcastReceiver {
             } else {
                 context.startService(i);
             }
+            Log2.i(TAG, "已直接启动 SdlService（startForegroundService）");
         } catch (Exception e) {
-            Log2.e(TAG, "onSdlEnabled 启动 SdlService 失败", e);
+            Log2.e(TAG, "onSdlEnabled 直接启动 SdlService 失败", e);
         }
     }
 
