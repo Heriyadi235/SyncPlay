@@ -204,9 +204,19 @@ public class StateRenderer {
                     Log2.i(TAG, "暂不刷新（" +
                             (lifecycle == null ? "未连接" : lifecycle.describe()) + "），等 HMI_FULL");
                 }
-                // 过一会儿再看
-                main.removeCallbacks(flush);
-                main.postDelayed(flush, RETRY_WHEN_NOT_FULL_MS);
+
+                /*
+                 * ★ 不再自己续期（曾经的 `postDelayed(flush, 1500)` 已删）。
+                 *
+                 *   旧写法在这个分支里从不清 dirty，于是每 1.5 秒就会重新跑一遍
+                 *   buildFrame()（新建 ScreenFrame、拼字符串、日文转写）——
+                 *   而「没连车机」恰恰是最常见的状态，等于进程活着就永不停止地
+                 *   每 1.5 秒醒一次。这是本应用最大的一处空转耗电。
+                 *
+                 *   去掉是安全的：数据变化有 markDirty() → schedule() 重新调度；
+                 *   进入 FULL 时 onHmiStatus 会调 onLifecycleChanged() → markDirty()，
+                 *   那时自然会再刷一次并真正发出去。
+                 */
                 return;
             }
             warnedNotFull = false;
@@ -223,8 +233,15 @@ public class StateRenderer {
     };
 
     public StateRenderer() {
-        main.postDelayed(staleWatchdog, STALE_CHECK_MS);
-        main.postDelayed(positionTicker, POSITION_POLL_MS);
+        /*
+         * ★ 不在这里启动轮询。
+         *
+         *   StateRenderer 由 SyncPlayCore 在 Application.onCreate 里创建，
+         *   构造函数里 postDelayed 等于「进程活着就一直跑」——
+         *   没连车机、没放音乐也每 900ms / 2s 醒一次，白耗电。
+         *
+         *   改成按需：{@link #ensureTickers()} 在歌曲/导航变化时启停。
+         */
     }
 
     /**
@@ -277,6 +294,7 @@ public class StateRenderer {
 
     public void setNavigation(Navigation n) {
         this.nav = n == null ? new Navigation() : n;
+        ensureTickers();
         markDirty("nav");
     }
 
@@ -285,11 +303,13 @@ public class StateRenderer {
         if (nav != null) nav.clear();
         navClockText = null;
         lastEtaSent = null;
+        ensureTickers();
         markDirty("navClear");
     }
 
     public void setSong(NowPlaying np) {
         this.song = np;
+        ensureTickers();
         markDirty("song");
     }
 
@@ -303,7 +323,40 @@ public class StateRenderer {
         this.song = null;
         this.lyrics = null;
         resetSongClock();
+        ensureTickers();
         markDirty("songGone");
+    }
+
+    /**
+     * 按需启停后台轮询 —— <b>省电的关键</b>。
+     *
+     * <pre>
+     *   positionTicker（900ms）：前提是「有歌」。
+     *       它做三件事：拉播放位置（歌词滚动的心跳）、判断暂停超时退回欢迎页、
+     *       以及触发 markDirty 让 Show/预览更新。
+     *       ★ 条件必须是「有歌」而不是「在播」—— 暂停超时那段逻辑也要靠它。
+     *
+     *   staleWatchdog（2s）：前提是「有导航数据」。
+     *       它负责在高德闪退/退出导航后把界面降级，
+     *       没有导航数据时它什么都不做，纯属空转。
+     * </pre>
+     *
+     * 以前这两条是在构造函数里无条件启动的，而 {@code StateRenderer} 由
+     * {@code SyncPlayCore} 在 {@code Application.onCreate} 就创建 ——
+     * 于是不管有没有音乐/导航，整个进程生命周期都在每 900ms / 2s 醒一次。
+     */
+    private void ensureTickers() {
+        // ① 播放位置心跳：有歌才跑
+        main.removeCallbacks(positionTicker);
+        if (song != null) {
+            main.postDelayed(positionTicker, POSITION_POLL_MS);
+        }
+
+        // ② 导航过期看门狗：有导航数据才跑
+        main.removeCallbacks(staleWatchdog);
+        if (nav != null && nav.hasData()) {
+            main.postDelayed(staleWatchdog, STALE_CHECK_MS);
+        }
     }
 
     /**

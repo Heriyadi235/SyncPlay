@@ -130,15 +130,24 @@ public class MainActivity extends AppCompatActivity {
 
         startSdlService();
 
-        // 定时刷新状态
-        main.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                refreshState();
-                main.postDelayed(this, 2000);
-            }
-        }, 1000);
+        /*
+         * 状态刷新的心跳改到 onResume 里启动（见那里的注释）。
+         * ★ 以前是在这里 postDelayed 自续期的匿名 Runnable，而且 onPause/onDestroy
+         *   都没有 removeCallbacks —— 离开主界面后它仍每 2 秒跑一次（改 TextView），
+         *   Activity 销毁后 Handler 还持有它，顺带泄漏。
+         */
     }
+
+    /** 主界面状态刷新间隔 */
+    private static final long STATE_TICK_MS = 2000;
+
+    private final Runnable stateTicker = new Runnable() {
+        @Override
+        public void run() {
+            refreshState();
+            main.postDelayed(this, STATE_TICK_MS);
+        }
+    };
 
     // ---------------- 权限 ----------------
 
@@ -467,6 +476,15 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         refreshState();
+        // 只在页面可见时刷新状态；onPause 会停掉
+        main.removeCallbacks(stateTicker);
+        main.postDelayed(stateTicker, STATE_TICK_MS);
+    }
+
+    @Override
+    protected void onPause() {
+        main.removeCallbacks(stateTicker);
+        super.onPause();
     }
 
     /** 打开日志界面（滑入动画） */

@@ -190,6 +190,22 @@ public class LogActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onDestroy() {
+        /*
+         * ★ 必须 stop 预览器的内部计时器。
+         *
+         *   ScreenPreviewView 里有一台 400ms 的 clockTicker（模拟车机时钟格走表），
+         *   它是自续期的：只要启动过就永不停。以前这里没有 onDestroy、也没人调
+         *   release()，后果是「打开过一次信息页，400ms 的 ticker 就永久跑下去」，
+         *   而且一直持有本 Activity 的 View 引用（耗电 + 泄漏）。
+         */
+        main.removeCallbacks(ticker);
+        if (previewCtrl != null) previewCtrl.release();
+        AmapLinkClient.setPreviewVisible(false);
+        super.onDestroy();
+    }
+
+    @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         if (item.getItemId() == android.R.id.home) {
             finish();

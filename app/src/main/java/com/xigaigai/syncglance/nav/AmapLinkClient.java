@@ -67,12 +67,22 @@ public class AmapLinkClient {
     private static final int MAX_BYTES = 4 * 1024 * 1024;
     /**
      * 最多重连次数。
-     * 官方 iOS SDK 推荐 maxReconnectAttempts = 50 / reconnectDelay = 2，
-     * 即总共试约 100 秒。
+     *
+     * <p>官方 iOS SDK 推荐 maxReconnectAttempts = 50 / reconnectDelay = 2（≈100 秒），
+     * 那是"连接健壮性"视角；代价是**持续唤醒**——高德没跑时（很常见）
+     * 开车路上会一直 bindService + 起 watchdog，挺费电。</p>
+     *
+     * <p>改成 10 次 ≈ 60 秒：前 5 次 2 秒（覆盖"高德刚启动"的竞态），
+     * 后 5 次 10 秒。之后要重连，用户点一下高德、或它启动发的通知会把
+     * 超时标记清掉，{@link #wakeUp()} 会重新开一轮。</p>
      */
-    private static final int MAX_ATTEMPTS = 50;
+    private static final int MAX_ATTEMPTS = 10;
+    /** 前几次用短间隔 */
+    private static final int FAST_ATTEMPTS = 5;
     /** 重连间隔（官方推荐 2 秒） */
     private static final long RETRY_DELAY_MS = 2_000;
+    /** 后几次的间隔（省电） */
+    private static final long SLOW_RETRY_DELAY_MS = 10_000;
     /** 绑定/注册超时 */
     private static final long WATCHDOG_MS = 10_000;
 
@@ -248,8 +258,17 @@ public class AmapLinkClient {
         return !closed && generation == token;
     }
 
+    /**
+     * 重试间隔。
+     *
+     * <p>以前是固定 2 秒 × 50 次 ≈ 100 秒的持续唤醒：高德没在跑时（很常见），
+     * 开车路上就会一直 bindService + 起 watchdog，非常费电。</p>
+     *
+     * <p>现在：前 5 次 2 秒（覆盖"高德刚启动、需要快点连上"的场景），
+     * 之后拉长到 10 秒，总共 10 次 ≈ 60 秒就停。唤醒次数从 50 降到 10。</p>
+     */
     private long retryDelay() {
-        return RETRY_DELAY_MS;
+        return attempts <= FAST_ATTEMPTS ? RETRY_DELAY_MS : SLOW_RETRY_DELAY_MS;
     }
 
     /**
@@ -318,11 +337,25 @@ public class AmapLinkClient {
 
     private void retry(Attempt a, String reason) {
         if (closed || current != a) return;
+
+        /*
+         * ★ 没人要看导航时，不要继续空转。
+         *
+         *   shouldDecode() = 已连车机 || 信息页可见。
+         *   两者都不成立时（比如平时放在兜里、也没连车机），继续 bindService
+         *   纯属浪费电。等用户打开信息页 / 车机连上，wakeUp() 会重新开始。
+         */
+        if (!shouldDecode()) {
+            a.retire();
+            current = null;
+            return;
+        }
+
         /*
          * 重试过程不打日志。
          *
-         * 高德没启动时会连试 50 次（约 100 秒），每次一条就是刷屏；
-         * 用户只需要知道「连上了」或者「试满 50 次还是连不上」。
+         * 高德没启动时会连试 10 次（约 60 秒），每次一条就是刷屏；
+         * 用户只需要知道「连上了」或者「试满次数还是连不上」。
          * 后者在 bind() 开头那次 beginAttempt() 失败时已经有一条汇总日志。
          */
         a.retire();

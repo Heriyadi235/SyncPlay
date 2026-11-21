@@ -99,7 +99,9 @@ public final class Log2 {
                 fullLog.delete(0, cut);
             }
         }
-        broadcast(ui);
+        // ★ 以前这里会 ctx.sendBroadcast(ACTION_LOG)，但全项目没有任何接收者
+        //   （信息页是直接读内存的），等于每条日志白发一次跨进程 IPC。
+        //   Show 每秒一次 + 各种日志，白发的广播非常可观 —— 已移除。
     }
 
     // ---------------- 原始 JSON ----------------
@@ -118,7 +120,11 @@ public final class Log2 {
                    .append(one).append('\n');
         }
         String preview = one.length() <= 260 ? one : one.substring(0, 260) + "…";
-        broadcast(TS_UI.format(new Date()) + "    " + direction + " " + preview);
+        // 只进内存环形缓冲；不再发无人接收的广播（见 emit 的注释）
+        synchronized (Log2.class) {
+            uiLines.addLast(TS_UI.format(new Date()) + "    " + direction + " " + preview);
+            while (uiLines.size() > MAX_UI_LINES) uiLines.removeFirst();
+        }
     }
 
     /**
@@ -138,17 +144,6 @@ public final class Log2 {
         } else {
             raw(direction, String.valueOf(rpcMessage));
         }
-    }
-
-    private static void broadcast(String line) {
-        Context ctx = appContext;
-        if (ctx == null) return;
-        try {
-            Intent i = new Intent(ACTION_LOG);
-            i.setPackage(ctx.getPackageName());
-            i.putExtra("msg", line);
-            ctx.sendBroadcast(i);
-        } catch (Exception ignored) { }
     }
 
     // ---------------- 导出 ----------------
