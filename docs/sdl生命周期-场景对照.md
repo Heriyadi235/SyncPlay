@@ -113,13 +113,13 @@ sdl.router.startservice
 | 11 | `SdlBroadcastReceiver` 必须 `exported` | **Must** | 是 | ✅ |
 | 12 | 覆写 `onReceive` 必须调 `super.onReceive` | **Must** | 我们**没覆写** `onReceive`，只覆写 `onSdlEnabled` | ✅ 不适用 |
 | 13 | `defineLocalSdlRouterClass()` 返回本地 Router 类 | **Must** | 返回 `SyncRouterService.class` | ✅ |
-| 14 | 本地 Router 类**必须命名为 `SdlRouterService`** | **Must** | 我们叫 `SyncRouterService` | ⚠ **偏离 Must**（实车能用，见 §7.2） |
+| 14 | 本地 Router 类**必须命名为 `SdlRouterService`** | **Must** | 已改名（原 `SyncRouterService`） | ✅ 2026-11-21 落实 |
 | 15 | 本地 Router 类必须与 `SdlReceiver` **同包** | **Must** | 都在 `receiver` 包 | ✅ |
 | 16 | Router Service 的 intent-filter `com.smartdevicelink.router.service` | **Must** | 有 | ✅ |
 | 17 | Router Service 必须在 `com.smartdevicelink.router` 进程 | **Must** | `android:process="com.smartdevicelink.router"` | ✅ |
 | 18 | `sdl_router_version` meta-data | 要求 | 有（`@integer/sdl_router_service_version_value`） | ✅ |
 | 19 | `onSdlEnabled` 里 **S 及以上用 PendingIntent** 启动 | **Must**（API 31+） | **双路**：先 `startForegroundService`，再发 PendingIntent | ⚠ 有实车证据的偏离（§6 #3） |
-| 20 | **API 34+ 要先检查 `AndroidTools.hasForegroundServiceTypePermission(context)`**，没有就 return | **Must**（API 34+） | **没有检查** | ❗ **未落实**（§7.1） |
+| 20 | **API 34+ 要先检查 `AndroidTools.hasForegroundServiceTypePermission(context)`**，没有就 return | **Must**（API 34+） | 已在 `SdlReceiver.onSdlEnabled` 加 | ✅ 2026-11-21 落实 |
 | 21 | `getSdlServiceName()` 默认返回 `"SdlService"`，类名不同要覆写 | Note | 我们的类就叫 `SdlService`，默认值正确 | ✅ |
 | 22 | `MultiplexTransportConfig` 连车机 | 要求 | `new MultiplexTransportConfig(ctx, APP_ID)` | ✅ |
 | 23 | 官方示例传 `FLAG_MULTI_SECURITY_OFF` | 示例 | 我们**不传**（用默认安全等级） | ⚠ 见 §7.3（这直接关系到那个崩溃） |
@@ -432,64 +432,117 @@ if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) return;   //
 | 6 | `closedOnce` + `ConnectionStatus` 六种文案 | 官方只要求前台通知，未规定文案 | — |
 | 7 | `handleConnectionClosed` 里 `stopSelf()` 前先 `updateNotification()` | 让状态可见 | — |
 | 8 | 崩溃兜底 `UncaughtExceptionHandler` | 只写日志，不吞异常 | — |
-| 9 | 不 `deleteNotificationChannel`（官方示例删） | 留渠道避免反复创建 | — |
-| 10 | Router 类命名 `SyncRouterService`（官方 **Must** 叫 `SdlRouterService`） | 早期命名沿用至今，实车能连 | 🟢 正常连接 |
-| 11 | 不传 `FLAG_MULTI_SECURITY_OFF`（官方示例传） | 不擅自降低安全等级 | 🟢 能连，但见 §7.3 |
-| 12 | 不做 Lock Screen（官方发布 Must） | 不上架 | — |
+| 9 | 不 `deleteNotificationChannel`（官方示例删） | 留渠道避免反复创建 / 丢用户设置 | — |
+| 10 | 不传 `FLAG_MULTI_SECURITY_OFF`（官方示例传） | 不擅自降低安全等级 | 🟢 能连，但见 §7.3 |
+| 11 | 不做 Lock Screen（官方发布 Must） | 不上架 | — |
 
-**结论**：偏离项**都不改变官方时序**。唯一踩过的雷是把「启动服务」也偏离到广播里（已撤回），
-以及把「探测」偏离到广播里（已撤回）。
+> **2026-11-21 已撤回的两项**：
+> ① Router 类命名 —— 已按官方 Must 改为 `SdlRouterService`；
+> ② API 34+ 权限检查 —— 已补上。
+
+**结论**：剩下的偏离**都不改变官方时序**。唯一踩过的雷是把「启动服务」也偏离到广播里
+（已撤回），以及把「探测」偏离到广播里（已撤回）。
 
 ---
 
-## 7. 未落实的官方要求 / 风险
+## 7. 已落实项 / 仍存在的风险
 
-### 7.1 ❗ API 34+ 缺 `hasForegroundServiceTypePermission` 检查（**最该修的**）
+### 7.1 ✅ API 34+ 前台服务权限检查（2026-11-21 已补）
 
-官方示例（Android UPSIDE_DOWN_CAKE = API 34 及以上）：
+`SdlReceiver.onSdlEnabled` 现在先做官方那道检查：
 
 ```java
 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
     if (!AndroidTools.hasForegroundServiceTypePermission(context)) {
-        DebugTool.logInfo(TAG, "Permission missing for ForegroundServiceType connected device.");
-        return;                                   // ← 直接放弃启动
+        Log2.w(TAG, "缺少 connectedDevice 前台服务权限，按官方要求放弃启动 SdlService");
+        return;
     }
 }
 ```
 
-**我们没有这个检查。** 后果：在 Android 14+ 上如果没有 `connectedDevice` 类型的前台服务权限，
-`startForegroundService` 可能抛异常（被我们的 try/catch 吞掉）→ 服务起不来 → 车机超时。
+（外面套了 try/catch：检查本身出错不能挡住启动。）
 
-**本车机实测**：Android 版本未确认；之前 15:14 那次 `startForegroundService` 失败过一次
-（日志：本机测试时 `connectedDevice` FGS 类型被系统拒），说明这条**可能真会踩到**。
+背景：API 34 起启动带 `connectedDevice` 类型的 FGS 必须有「已连接的设备」或对应权限，
+否则 `startForegroundService` 抛异常。我们以前没检查，异常被吃掉，车机侧表现为超时。
+本机是 **Android 15（API 35）**，早在这条规则适用范围内。
 
-**建议**：补上这个检查（只加 4 行，不改时序）。
+### 7.2 ✅ Router 类名已改为 `SdlRouterService`（2026-11-21）
 
-### 7.2 ⚠ Router 类名违反官方 Must
+**改名时踩到一个 Java 语言层面的坑**，值得记住：
 
-官方原文：
+> `SdlReceiver.java` 原本 `import com.smartdevicelink.transport.SdlRouterService;`。
+> 改名后我们的子类也叫 `SdlRouterService`（同包）。按 JLS，**单类型 import 会遮蔽
+> 同包同名类型** —— 于是 `SdlRouterService.class` 会解析成**库的基类**，
+> `defineLocalSdlRouterClass()` 返回基类，运行时被库判非法。
+>
+> 解法就是官方那条警告：**不 import 基类，用全限定名**
+> （`Class<? extends com.smartdevicelink.transport.SdlRouterService>`）。
 
-> "**The local extension of the `com.smartdevicelink.transport.SdlRouterService`
-> must be named `SdlRouterService`.**"
+改名后实测（本机）：
+- `dumpsys package` 里是 `.receiver.SdlRouterService` ✓
+- 直接 `am start-foreground-service` 能让 Router 进程起并打出
+  `[Router] RouterService 上线` ✓
+- 验证器那三条 RouterService 检查全过：
+  `✓ SdlRouterService entry and metadata checks passed` /
+  `✓ SdlRouterService intent filter check passed` ✓
 
-我们叫 `SyncRouterService`。虽然实车一直能连，但这是明确的 Must。
-改名影响面：`SyncRouterService.java` + Manifest + `defineLocalSdlRouterClass()` + 若干引用。
-
-**建议**：**先不动**（能跑就不折腾），但如果以后出现 Router 相关的诡异问题，
-这是第一个该排查的点。
-
-### 7.3 ⚠ `FLAG_MULTI_SECURITY_OFF` 与那个崩溃的关系
+### 7.3 ⚠ 仍存在：`FLAG_MULTI_SECURITY_OFF` 与那个崩溃的关系
 
 官方示例传 `FLAG_MULTI_SECURITY_OFF`（降低安全等级）。我们不传，于是走完整安全等级
 → 走**信任列表校验**（`RouterServiceValidator.createTrustedListRequest` → `bindService`）
 → 这才是 18:31/18:33 崩溃的触发路径。
 
-**换句话说**：如果照官方示例传这个 flag，那个崩溃可能压根不会发生。
+**换句话说**：照官方示例传这个 flag，那个崩溃可能压根不会发生。
 
-但这是**降低安全性**换取稳定性，我们的选择是「保持安全等级，改用合规的调用位置」。
-**如果以后还想进一步降低崩溃风险，可以考虑这个 flag** —— 但要先确认它对本车没有副作用。
+但这是**用降低安全性换稳定性**。我们的选择是「保持安全等级，改用合规的调用位置」。
+如果以后还想进一步降低崩溃风险，可以考虑这个 flag —— 前提是先确认对本车无副作用。
 
-### 7.4 未解：`onSdlEnabled` 后 58~115ms 自毁
+### 7.4 ⚠ 新发现：debug 包**首次**启动 Router 会崩一次（第二次正常）
+
+2026-11-21 本机实测（改名验证时撞上）：
+
+```text
+Caused by: java.lang.RuntimeException:
+  ✓ Permission check passed
+  ✓ SdlRouterService entry and metadata checks passed
+  ✓ SdlRouterService intent filter check passed
+  ✕ This application has not specified its SDL Receiver properly.
+    at com.smartdevicelink.transport.SdlRouterService.onCreate(SdlRouterService.java:1163)
+    at com.xigaigai.syncglance.receiver.SdlRouterService.onCreate(SdlRouterService.java:82)
+```
+
+**机制**（反编译 `IntegrationValidator` 确认）：
+
+```java
+if (AndroidTools.isDebugMode(ctx)) {                       // 只在 debug 包跑
+    ValidationResult r = IntegrationValidator.validate(ctx, getClass(), 0);
+    if (!r.isSuccessful()) throw new RuntimeException(r.getResultText());
+}
+```
+
+而 `validate` 里检查 receiver 的方式是：
+
+```java
+List<ResolveInfo> l = pm.queryBroadcastReceivers(new Intent("sdl.router.startservice"), 0);
+PackageInfo pi = pm.getPackageInfo(pkgName, GET_RECEIVERS);
+// 两边按 name 求交集，找不到 → "has not specified its SDL Receiver properly"
+```
+
+`queryBroadcastReceivers` 查的是**隐式广播**（intent 没带 package），
+而 Android 8.0 起带 manifest 的 receiver 默认收不到隐式广播（`sdl.router.startservice`
+不在豁免名单），所以这个查询可能返回空 —— **功能上没问题**（Router 发广播时带了
+`setPackage()`，是定向广播），**只是验证器查不到**。
+
+**实测表现**：装机后第一次启动 Router → 崩（弹 crash dialog）；
+第二次起就正常，`RouterService 上线` 日志照常。
+之前 15:48 出现的那条 `✕` 也是同一来源。
+
+**结论**：
+- 这条**不是配置错误**，**绝对不要为此改 manifest**（`dumpsys package` 已证明声明完整）
+- 影响面：仅 debug 包、仅"装机后第一次"，release 包不跑验证器
+- 实车若撞上：表现为装机后首次连车机时闪退一次，再试即可
+
+### 7.5 未解：`onSdlEnabled` 后 58~115ms 自毁
 
 见 [连接可靠性排查.md](连接可靠性排查.md) 第 9.1 节。
 已在 `handleConnectionClosed` 加了「建连至今 ms / RouterAlive / 代际」诊断，等实车数据。

@@ -31,7 +31,7 @@ import com.xigaigai.syncglance.util.Log2;
  * 用进程级的 {@code static} 保证每个进程真的只做一次。
  *
  * <h3>⚠ 必须限定主进程</h3>
- * {@code SyncRouterService} 跑在独立进程
+ * {@code SdlRouterService} 跑在独立进程
  * （{@code com.smartdevicelink.router}），它<b>也会</b>触发本 Application 的
  * {@code onCreate}。在那个进程里调 {@code queryForConnectedService}
  * 等于「Router 问自己有没有连上」，没有意义还可能干扰时序。

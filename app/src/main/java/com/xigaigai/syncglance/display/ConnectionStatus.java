@@ -25,7 +25,7 @@ public final class ConnectionStatus {
 
     /**
      * @param hmi         生命周期状态；null 视作 {@code DISCONNECTED}
-     * @param routerAlive RouterService 是否在跑（由 {@code SyncRouterService} 广播上报）
+     * @param routerAlive RouterService 是否在跑（由 {@code SdlRouterService} 广播上报）
      * @param closedOnce  本次启动后是否"连上过又断开了"
      * @param content     FULL 时车机上显示的内容，可为 null
      * @return 通知正文，例如「未连接（蓝牙未连接）」「已连接（歌曲）」

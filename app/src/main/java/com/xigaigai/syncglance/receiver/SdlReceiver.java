@@ -6,8 +6,8 @@ import android.content.Intent;
 import android.os.Build;
 
 import com.smartdevicelink.transport.SdlBroadcastReceiver;
-import com.smartdevicelink.transport.SdlRouterService;
 import com.smartdevicelink.transport.TransportConstants;
+import com.smartdevicelink.util.AndroidTools;
 import com.xigaigai.syncglance.service.SdlService;
 import com.xigaigai.syncglance.util.Log2;
 
@@ -47,10 +47,16 @@ public class SdlReceiver extends SdlBroadcastReceiver {
      *
      * 必须返回我们自己声明的子类，不能返回库里的基类 ——
      * 库会在运行时检查并在 debug 模式下直接抛异常。
+     *
+     * <p>⚠ 返回类型这里**故意写全限定名**、并且文件顶部**不 import** 库的
+     * {@code SdlRouterService}：我们自己的子类跟它同名（官方 <b>Must</b>：
+     * 本地类必须叫 {@code SdlRouterService}），而 Java 的**单类型 import 会遮蔽
+     * 同包同名类** —— 一旦 import 了库那个，`SdlRouterService.class` 就会解析成
+     * 基类，运行时直接被库判非法。官方文档也专门警告过这一点。</p>
      */
     @Override
-    public Class<? extends SdlRouterService> defineLocalSdlRouterClass() {
-        return SyncRouterService.class;
+    public Class<? extends com.smartdevicelink.transport.SdlRouterService> defineLocalSdlRouterClass() {
+        return SdlRouterService.class;
     }
 
     /**
@@ -82,6 +88,36 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     @Override
     public void onSdlEnabled(Context context, Intent intent) {
         Log2.i(TAG, "★ onSdlEnabled —— 车机已连通 RouterService，启动 SdlService");
+
+        /*
+         * ★ 官方 Must（Android 14 / API 34 及以上）：先检查有没有
+         *   connectedDevice 类型的前台服务权限，没有就**直接放弃启动**。
+         *
+         *   官方示例：
+         *     if (!AndroidTools.hasForegroundServiceTypePermission(context)) {
+         *         DebugTool.logInfo(TAG, "Permission missing for ForegroundServiceType ...");
+         *         return;
+         *     }
+         *
+         *   为什么要这条：API 34 起，启动带 connectedDevice 类型的 FGS 必须有
+         *   「已连接的设备」或对应权限，否则 startForegroundService 会抛
+         *   ForegroundServiceStartNotAllowedException。以前我们没检查，
+         *   异常被 try/catch 吞掉，服务起不来，车机侧表现为「正在连接」直到超时。
+         *
+         *   本机是 Android 15（API 35），早就在这条规则的适用范围内。
+         */
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                if (!AndroidTools.hasForegroundServiceTypePermission(context)) {
+                    Log2.w(TAG, "缺少 connectedDevice 前台服务权限，按官方要求放弃启动 SdlService");
+                    return;
+                }
+            } catch (Throwable t) {
+                // 检查本身出问题不能挡住启动，记一笔继续
+                Log2.w(TAG, "检查前台服务类型权限时异常: "
+                        + t.getClass().getSimpleName() + " " + t.getMessage());
+            }
+        }
 
         // ① 可靠路径：自己拉起来
         startSelf(context, intent);
@@ -143,7 +179,7 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     public static boolean wakeRouter(Context context) {
         if (context == null) return false;
         try {
-            Intent i = new Intent(context, SyncRouterService.class);
+            Intent i = new Intent(context, SdlRouterService.class);
             i.setAction(TransportConstants.ROUTER_SERVICE_ACTION);
             i.putExtra(TransportConstants.FOREGROUND_EXTRA, true);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

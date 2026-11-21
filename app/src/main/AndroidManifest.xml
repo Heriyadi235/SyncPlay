@@ -46,7 +46,7 @@
             <action android:name="com.autonavi.minimap.service.NAVIGATION_SERVICE" />
         </intent>
         <!-- ★ SDL 5.x 必须：否则看不到 / 查不到自己的 RouterService，
-             表现为 SdlManager 建好就立刻自毁、SyncRouterService 根本不起进程 -->
+             表现为 SdlManager 建好就立刻自毁、SdlRouterService 根本不起进程 -->
         <intent>
             <action android:name="com.smartdevicelink.router.service" />
         </intent>
@@ -97,7 +97,7 @@
         <!-- ===== SDL 传输层 =====
              这两个是 SDL 官方标准集成，缺一不可：
 
-             1. SyncRouterService —— 常驻的蓝牙路由器。负责监听 RFCOMM、
+             1. SdlRouterService —— 常驻的蓝牙路由器。负责监听 RFCOMM、
                 注册 SDP 记录（车机靠它发现本应用），并把一条物理连接
                 多路复用给多个 SDL 应用。action 必须是库定义的那个字符串。
              2. SdlReceiver —— 官方生命周期入口。监听 ACL_CONNECTED 与
@@ -107,7 +107,7 @@
              于是「应用没启动时车机连不上、之后也再连不上」——
              因为没有任何东西在车机连接窗口期里监听 RFCOMM。 -->
         <service
-            android:name=".receiver.SyncRouterService"
+            android:name=".receiver.SdlRouterService"
             android:exported="true"
             android:process="com.smartdevicelink.router"
             android:foregroundServiceType="connectedDevice">

@@ -29,7 +29,7 @@ import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
 import com.xigaigai.syncglance.lyric.LyricManager;import com.xigaigai.syncglance.model.Navigation;
 import com.xigaigai.syncglance.model.NowPlaying;
-import com.xigaigai.syncglance.receiver.SyncRouterService;
+import com.xigaigai.syncglance.receiver.SdlRouterService;
 import com.xigaigai.syncglance.util.Log2;
 
 import java.util.Vector;
@@ -170,7 +170,7 @@ public class SdlService extends Service {
 
     // ---------------- RouterService 存活探测 ----------------
 
-    /** RouterService 是否在跑（由 {@link SyncRouterService} 在 onCreate/onDestroy 时广播上报） */
+    /** RouterService 是否在跑（由 {@link SdlRouterService} 在 onCreate/onDestroy 时广播上报） */
     private volatile boolean routerAlive = false;
 
     /**
@@ -208,7 +208,7 @@ public class SdlService extends Service {
             @Override
             public void onReceive(Context context, Intent intent) {
                 String action = intent == null ? null : intent.getAction();
-                boolean alive = SyncRouterService.ACTION_ROUTER_ALIVE.equals(action);
+                boolean alive = SdlRouterService.ACTION_ROUTER_ALIVE.equals(action);
                 if (alive == routerAlive) return;
                 routerAlive = alive;
                 Log2.i(TAG, "RouterService " + (alive ? "已启动" : "已退出") + "，刷新通知");
@@ -216,8 +216,8 @@ public class SdlService extends Service {
             }
         };
         android.content.IntentFilter f = new android.content.IntentFilter();
-        f.addAction(SyncRouterService.ACTION_ROUTER_ALIVE);
-        f.addAction(SyncRouterService.ACTION_ROUTER_DEAD);
+        f.addAction(SdlRouterService.ACTION_ROUTER_ALIVE);
+        f.addAction(SdlRouterService.ACTION_ROUTER_DEAD);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(routerWatcher, f, Context.RECEIVER_NOT_EXPORTED);
@@ -1308,7 +1308,7 @@ public class SdlService extends Service {
      *   没必要自己乱改，除非发现了难以解决的兼容性问题。**
      *
      *   官方没有应用层重试 —— 重连靠 SDL 官方链路：
-     *     车机重连 → ACL_CONNECTED → SdlReceiver/SyncRouterService 起路由
+     *     车机重连 → ACL_CONNECTED → SdlReceiver/SdlRouterService 起路由
      *     → sdl.router.startservice / onSdlEnabled → 系统重新拉起本 Service → 重建 SdlManager
      *
      *   所以前台通知只在**本 Service 存活期间**存在（正常就是车机连接期间）。
