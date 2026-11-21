@@ -528,7 +528,18 @@ public class SdlService extends Service {
             lifecycle.onProxyCreated();
             // 把发送通道挂到 SyncPlayCore（渲染器与数据采集都在那边）
             com.xigaigai.syncglance.core.SyncPlayCore.get()
-                    .attachSender(msg -> sendRpc((RPCRequest) msg));
+                    .attachSender(new com.xigaigai.syncglance.display.StateRenderer.Sender() {
+                        @Override
+                        public void send(com.smartdevicelink.proxy.RPCMessage msg) {
+                            sendRpc((RPCRequest) msg);
+                        }
+
+                        @Override
+                        public void sendSequential(
+                                java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
+                            sendRpcSequential(msgs);
+                        }
+                    });
             sdlManager.start();
             updateNotification();
             Log2.i(TAG, "✓ SdlManager 已启动，等待车机连上并完成注册"
@@ -639,18 +650,11 @@ public class SdlService extends Service {
                                 + (response.getInfo() == null ? "" : " " + response.getInfo()));
 
                         /*
-                         * ★ 时钟指令被拒 → 通知渲染器改用兜底显示。
-                         *
-                         *   实车实测：SetMediaClockTimer 用 StartTime(0,13,58)
-                         *   （借分钟位显示到达时刻）会被判 REJECTED，而
-                         *   StartTime(0,0,5) 是 SUCCESS。这条路上显示不出 ETA，
-                         *   所以要让 renderer 回落到 mediaTrack 显示「13:58到」，
-                         *   并停止再发注定被拒的包。
+                         * ⚠ 这里曾经调 renderer.onClockRpcFailed()，那是基于
+                         *   "分钟位有上限" 这个错误归因加的兜底。真实原因是
+                         *   「单步 PAUSE + startTime」无效，改成两步法后就不再需要，
+                         *   兜底逻辑已删除（见 AGENTS.md §6.6.1）。
                          */
-                        if (req instanceof com.smartdevicelink.proxy.rpc.SetMediaClockTimer
-                                && renderer != null) {
-                            renderer.onClockRpcFailed(String.valueOf(response.getResultCode()));
-                        }
                     }
                 }
             });
@@ -659,6 +663,61 @@ public class SdlService extends Service {
             logRawJson("→", req);
         } catch (Exception e) {
             Log2.e(TAG, "发送失败: " + req.getFunctionName(), e);
+        }
+    }
+
+    /**
+     * 按顺序发一串 RPC —— <b>等上一条响应回来才发下一条</b>。
+     *
+     * <p>为什么必须有序：车机的 {@code PAUSE} 会忽略 {@code startTime}，
+     * 只暂停"当前正在跑的那块表"。所以「把时钟定在某个读数」= 先
+     * {@code COUNTUP(startTime)} 起表、再 {@code PAUSE} 停住 ——
+     * 两条并发发出去的话，PAUSE 可能先到，就会被拒或者停错表。</p>
+     *
+     * <p>用 SDL 的 {@code sendSequentialRPCs}：它内部等每条的 response
+     * （无论成功失败）再发下一条，正是我们要的语义。</p>
+     */
+    public void sendRpcSequential(java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
+        if (msgs == null || msgs.isEmpty()) return;
+        if (sdlManager == null) {
+            Log2.w(TAG, "✗ 未连接，丢弃 " + msgs.size() + " 条有序 RPC");
+            return;
+        }
+        if (!lifecycle.canSendRpc()) {
+            Log2.w(TAG, "✗ 当前 " + lifecycle.describe() + "，不能发有序 RPC（需 HMI_FULL）");
+            return;
+        }
+        try {
+            java.util.List<com.smartdevicelink.proxy.RPCMessage> list = new java.util.ArrayList<>(msgs);
+            for (com.smartdevicelink.proxy.RPCMessage m : list) {
+                Log2.i(TAG, "→ (seq) " + m.getFunctionName());
+                logRawJson("→", m);
+            }
+            sdlManager.sendSequentialRPCs(list,
+                    new com.smartdevicelink.proxy.rpc.listeners.OnMultipleRequestListener() {
+                @Override
+                public void onUpdate(int remainingRequests) {
+                    // 还有几条没发完（库每发完一条调一次）
+                }
+
+                @Override
+                public void onFinished() {
+                    Log2.i(TAG, "有序 RPC 发完（共 " + list.size() + " 条）");
+                }
+
+                @Override
+                public void onResponse(int correlationId, RPCResponse response) {
+                    if (response == null) return;
+                    Log2.rawMsg("←", response);
+                    if (!response.getSuccess()) {
+                        Log2.w(TAG, "(seq) " + response.getFunctionName() + " ← "
+                                + response.getResultCode()
+                                + (response.getInfo() == null ? "" : " " + response.getInfo()));
+                    }
+                }
+            });
+        } catch (Exception e) {
+            Log2.e(TAG, "有序发送失败", e);
         }
     }
 

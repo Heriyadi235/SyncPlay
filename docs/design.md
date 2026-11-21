@@ -223,31 +223,63 @@
 ### 2.8 计时器显示
 
 - 位置：第 3 行右侧，由 `SetMediaClockTimer` 渲染
-- **暂停时仍占屏**：用 `updatePauseWithNewStartTime` 把暂停那一刻的读数
-  写成新的 `startTime` 再置 `PAUSE`，让数字定格而不是被清空
+- **暂停时仍占屏**：用「两步法」把读数定格 —— 见下
 - 计时器存在（走秒或暂停）时，ETA 和播放进度都让位
 - **倒计时上限 59:59**：车机那一格只有 `mm:ss`，分钟滚轮给到 59 为止
   （车机时钟格只有 `mm:ss`，没有小时位）
+
+#### 2.8.1 「定格一个读数」必须两步（实车语义）
+
+2026-11-21 用 RPC Builder 在车上验证出来（详见 `AGENTS.md` §6.6.1）：
+
+| 指令 | `startTime` 是否生效 |
+|---|---|
+| `COUNTUP` / `COUNTDOWN` | ✅ 生效，从给定时间起表 |
+| `PAUSE` / `RESUME` | ❌ **被忽略**，只暂停/继续当前那块表 |
+| `PAUSE`，当前无 timer | ❌ 返回 `REJECTED` |
+| `PAUSE`，当前已是暂停态 | ❌ 返回 `IGNORE` |
+
+所以「把那一格定在某个读数」必须：
+
+```
+① COUNTUP(startTime=目标值)     起一块表
+② PAUSE                         停住它（不带 startTime，带了也白搭）
+```
+
+两条**必须按顺序发**（`sendSequentialRPCs`）。并发发出去的话 PAUSE 可能先到，
+就会被拒或者停错表。
+
+> 历史教训：以前用的是 `updatePauseWithNewStartTime(定格读数)` 单条 PAUSE，
+> 车机压根不看那个时间参数 —— 所以"暂停定格"其实一直是坏的，
+> 表现就是那一格空着或者保持旧值。
 
 ### 2.9 导航 ETA 显示
 
 **直接显示「几点到达」的固定时刻，不是倒计时。**
 
-高德数据包里本来就带 ETA 时刻，没必要换算成「还剩多少」再倒计时：
+高德数据包里本来就带 ETA 时刻，没必要换算成「还剩多少」再倒计时。
+
+**借 mm:ss 位显示到达时刻**：车机那一格是 `mm:ss`，把 `hh:mm` 拆成
+`minutes=hh, seconds=mm`，车机会原样渲染成 `16:21`：
 
 ```java
-// ★ 车机那一格是 mm:ss，没有小时位。
-//   ETA 16:21 要发 StartTime(0, 16, 21)，车机渲染出来就是 "16:21"；
-//   发 StartTime(16, 21, 0) 会被车机直接 REJECTED。
-t.setStartTime(new StartTime(0, h, m));   // hh 借 minutes 位，mm 借 seconds 位
-t.setUpdateMode(UpdateMode.PAUSE);         // 定格，不走秒
+// 两步法（见 §2.8.1）：
+//   ① COUNTUP(StartTime(0, hh, mm))  → 车机起表
+//   ② PAUSE                          → 停住
+// ⚠ 单步 PAUSE + startTime 无效，车机会 REJECTED
+SetMediaClockTimer[] pair = renderer.freezeClockRpc(hh, mm, 0);
 ```
+
+> ⚠ **待实车确认**：两步法下 `CLOCK3` 那一格到底会显示成 `16:21`
+> 还是别的东西（如 `00:16`）尚未验证。旧版一直用单步 PAUSE，
+> 全被拒，从没看到过真实渲染结果。
 
 **更新规则**：到达时刻变了才重发。高德的 ETA 按分钟算，同一分钟内反复推送
 都是同一个值，所以不需要额外门槛。
 
 **触发时机**：导航数据每次推送都要检查一次 ETA。只在换歌时检查的话，
 一路导航下来到达时刻会永远停在第一次推送的那个值。
+
 
 ---
 

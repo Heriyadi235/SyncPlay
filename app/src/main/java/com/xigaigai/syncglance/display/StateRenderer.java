@@ -71,6 +71,15 @@ public class StateRenderer {
      */
     public interface Sender {
         void send(RPCMessage msg);
+
+        /**
+         * 按顺序发一串 RPC：<b>等上一条响应回来（无论成功失败）才发下一条</b>。
+         *
+         * <p>时序敏感的指令必须走这个 —— 例如「先 COUNTUP 起表、再 PAUSE 停住」
+         * （见 {@link #freezeClockRpc}）。如果两条并发发出去，
+         * PAUSE 可能比 COUNTUP 先到，就会停错表或者因为没有表在跑而被拒。</p>
+         */
+        void sendSequential(java.util.List<? extends RPCMessage> msgs);
     }
 
     private Sender sender;
@@ -687,22 +696,11 @@ public class StateRenderer {
         f.mediaTrack = Romaji.convert(f.mediaTrack);
 
         /*
-         * ★ 车机拒绝「借分钟位显示到达时刻」之后的兜底。
-         *
-         *   时钟格只能放 mm:ss，而车机连 StartTime(0,13,58) 都判 REJECTED
-         *   （实车日志见 onClockRpcFailed 的注释），那条路彻底走不通。
-         *   但 ETA 是这个应用的核心信息，不能就这么没了 ——
-         *   改放到 mediaTrack（第 3 行左侧，8 字符宽）："13:58到" 正好 6 个半角。
-         *
-         *   只在「导航中 + 导航模式」时占用这一格；那时 mediaTrack 本来就是
-         *   剩余距离，两个信息选 ETA（用户明确要求的）。
+         * ⚠ 这里曾经有一段「ETA 被拒 → 改放 mediaTrack 显示 13:58到」的兜底。
+         *    那是基于错误归因加的（以为是"分钟位有上限"）。
+         *    真实原因是「单步 PAUSE + startTime」这个写法无效，
+         *    改成两步法（COUNTUP 起表 + PAUSE 停住）就能正常显示，兜底已删除。
          */
-        if (etaClockRejected && (st == State.B_NAV_ONLY || st == State.D_BOTH)) {
-            String eta = navClockText;
-            if (eta != null && !eta.isEmpty()) {
-                f.mediaTrack = eta + "到";
-            }
-        }
 
         // ★ 计时器占用时钟格时，track 前加 §（其他状态不加，见 statusPrefix 注释）
         if (f.mediaTrack != null && !f.mediaTrack.isEmpty()) {
@@ -772,8 +770,7 @@ public class StateRenderer {
         }
 
         // ② 导航 ETA：借 mm:ss 位显示到达时刻（hh 塞进分钟位）
-        //    车机拒过就跳过 —— 否则预览会显示一个车机上根本没有的时刻。
-        String eta = etaClockUsable() ? navClockText : null;
+        String eta = navClockText;
         if (eta != null && eta.indexOf(':') > 0) {
             try {
                 int c = eta.indexOf(':');
@@ -1000,7 +997,7 @@ public class StateRenderer {
      * @return 需要发送的 RPC；不需要返回 null
      */
     /**
-     * 用户计时器指令 → {@link SetMediaClockTimer}。
+     * 用户计时器指令。
      *
      * <b>只构造，不发送</b>：发不发、发不出去怎么办，由调用方
      * （{@code SyncPlayCore}）决定。这样计时器的"本地状态"和"发 RPC"
@@ -1008,8 +1005,12 @@ public class StateRenderer {
      *
      * ⚠ 调用前必须先 {@link #setTimerState}：PAUSE 的定格读数依赖它记下的
      *   {@code timerPausedAt}，顺序反了会算出"还在走"的值。
+     *
+     * @return 要按顺序发出的指令列表（0~2 条）。暂停返回两条，见下面的注释。
      */
-    public SetMediaClockTimer timerRpc(int h, int m, int s, String mode) {
+    public java.util.List<SetMediaClockTimer> timerRpcList(int h, int m, int s, String mode) {
+        java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(2);
+
         UpdateMode um;
         try {
             um = UpdateMode.valueForString(mode);
@@ -1019,28 +1020,45 @@ public class StateRenderer {
 
         switch (um) {
             case PAUSE: {
-                // 暂停时也要把时间停在屏上。
-                // pauseWithPlayPauseIndicator() 只发 UPDATE_MODE=PAUSE、不带 startTime，
-                // 车机很可能把那一格清空；所以把定格读数写成新的 startTime 再置 PAUSE。
+                /*
+                 * ★ 暂停定格必须两步（2026-11-21 实车 RPC Builder 验证）：
+                 *
+                 *   车机的 PAUSE 会**忽略 startTime**，只暂停当前正在跑的那块表。
+                 *   所以以前那条 `updatePauseWithNewStartTime(定格读数)` 其实是无效的 ——
+                 *   车机看不到时间参数，只是"暂停"了一下；如果当时压根没有表在跑，
+                 *   就直接 REJECTED，那一格保持旧值。
+                 *
+                 *   正确做法：
+                 *     ① COUNTUP(定格读数)  重新起一块表
+                 *     ② PAUSE              停住它
+                 *   两条必须按序发（sendSequentialRPCs）。
+                 */
                 long sec = timerElapsedSeconds();
                 int hh = (int) (sec / 3600);
                 int mm = (int) ((sec / 60) % 60);
                 int ss = (int) (sec % 60);
-                Log2.i(TAG, "计时器暂停，定格在 " + hh + ":" + mm + ":" + ss);
-                return SetMediaClockTimer.updatePauseWithNewStartTime(
-                        clockStart(hh, mm, ss), null, AudioStreamingIndicator.PAUSE);
+                Log2.i(TAG, "计时器暂停，两步法定格在 " + hh + ":" + mm + ":" + ss);
+
+                SetMediaClockTimer[] pair = freezeClockRpc(hh, mm, ss);
+                out.add(pair[0]);
+                out.add(pair[1]);
+                return out;
             }
             case RESUME:
-                return SetMediaClockTimer.resumeWithPlayPauseIndicator(AudioStreamingIndicator.PLAY);
+                out.add(SetMediaClockTimer.resumeWithPlayPauseIndicator(AudioStreamingIndicator.PLAY));
+                return out;
             case CLEAR:
-                return SetMediaClockTimer.clearWithPlayPauseIndicator(AudioStreamingIndicator.PAUSE);
+                out.add(SetMediaClockTimer.clearWithPlayPauseIndicator(AudioStreamingIndicator.PAUSE));
+                return out;
             case COUNTDOWN:
-                return SetMediaClockTimer.countDownFromStartTime(
-                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY);
+                out.add(SetMediaClockTimer.countDownFromStartTime(
+                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY));
+                return out;
             case COUNTUP:
             default:
-                return SetMediaClockTimer.countUpFromStartTime(
-                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY);
+                out.add(SetMediaClockTimer.countUpFromStartTime(
+                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY));
+                return out;
         }
     }
 
@@ -1056,66 +1074,86 @@ public class StateRenderer {
         return new StartTime(0, (int) (total / 60), (int) (total % 60));
     }
 
-    public SetMediaClockTimer songClockRpc() {
-        if (timerRunning) return null;
-        if (sender == null) return null;
+    /**
+     * 算出「现在该往车机发的时钟指令」，可能有 <b>一到两条</b>。
+     *
+     * <h3>为什么要返回序列</h3>
+     * 2026-11-21 上车用 RPC Builder 验出来的真实语义（见 AGENTS.md §6.6.1）：
+     * <ul>
+     *   <li>{@code COUNTUP} / {@code COUNTDOWN} 的 {@code startTime} <b>生效</b></li>
+     *   <li>{@code PAUSE} / {@code RESUME} 的 {@code startTime} <b>被忽略</b> ——
+     *       它只是暂停/继续当前正在跑的那块表</li>
+     *   <li>没有 timer 在跑时发 {@code PAUSE} → {@code REJECTED}；
+     *       已经是暂停态时发 → {@code IGNORE}</li>
+     * </ul>
+     *
+     * 所以「把那一格定在某个读数」必须两步：
+     * <pre>
+     *   ① COUNTUP(startTime=目标值)   让车机起一块表
+     *   ② PAUSE                        停住它（不带 startTime，带了也白搭）
+     * </pre>
+     * 以前我们只发一条 {@code PAUSE + startTime}，车机压根不看时间参数 →
+     * 必然 {@code REJECTED}，那一格永远是空的。
+     *
+     * @return 要按顺序发出的 RPC 列表；空列表表示本轮不用发
+     */
+    public java.util.List<SetMediaClockTimer> songClockRpcList() {
+        java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(2);
 
-        // 导航模式优先显示 ETA（车机拒过就不再尝试，见 onClockRpcFailed）
-        if (etaClockUsable() && navClockText != null && !navClockText.isEmpty()) {
+        if (timerRunning) return out;
+        if (sender == null) return out;
+
+        // 导航模式优先显示 ETA
+        if (navClockText != null && !navClockText.isEmpty()) {
             // ★ 只有"确实要发出去"时才更新 lastClockTextSent。
             //
             //   以前的写法是先赋值、再检查，只要中间任一步 return（etaClockNow 取不到值、
             //   ETA 恰好没变），这张"票"就被白白用掉了 —— 之后每次进来都在上一行
             //   `navClockText.equals(last)` 处直接返回，ETA 永久卡死，直到导航结束。
             //   实测就是这样：整个导航期间一条 SetMediaClockTimer 都没发出去。
-            if (navClockText.equals(lastClockTextSent)) return null;
-            if (nav == null) return null;
+            if (navClockText.equals(lastClockTextSent)) return out;
+            if (nav == null) return out;
 
             String clock = nav.etaClockNow();
-            if (clock == null) return null;          // 暂时拿不到到达时刻，下次再试，不消耗标记
+            if (clock == null) return out;           // 暂时拿不到到达时刻，下次再试，不消耗标记
 
             if (!shouldResendEta(clock)) {
                 // ETA 时刻本身没变：记下当前值避免反复尝试，但等待它变化
                 lastClockTextSent = navClockText;
-                return null;
+                return out;
             }
 
-            // ★ 直接把到达时刻打在计时器上，然后让它停住。
-            //
-            //   高德数据包里本来就带着 ETA 时刻，没必要换算成"还剩多少"再倒计时，
-            //   也没必要从 0 往上数。setStartTime = 到达的 hh:mm，
-            //   updateMode = PAUSE → 车机就定格显示这个时间，不再走秒。
-            //
-            //   ★ 关键：车机的时钟格是 mm:ss，没有小时位。
-            //   照片实测那一格显示的是 "1:55"（分:秒），
-            //   所以只要 hours ≠ 0 车机就判 REJECTED（实测 16:21 连拒两次）。
-            //   对策是把 hh:mm 拆成 minutes=hh、seconds=mm，
-            //   车机会原样渲染成 "16:21"，正好是我们要的到达时刻。
+            /*
+             * ★ 借 mm:ss 位显示到达时刻：StartTime(0, hh, mm)
+             *
+             *   车机只支持 CLOCK3 / CLOCKTEXT4，那一格是 mm:ss。
+             *   把 hh:mm 拆成 minutes=hh、seconds=mm，车机会原样渲染成 "16:21"。
+             *   （这一步能不能真显示出 hh:mm 还要上车看，但先把指令发对。）
+             */
             int h = 0, m = 0;
             try {
                 int c = clock.indexOf(':');
                 h = Integer.parseInt(clock.substring(0, c));
                 m = Integer.parseInt(clock.substring(c + 1));
             } catch (Exception ignored) { }
-            Log2.i(TAG, "计时器：显示到达时刻 " + clock
-                    + " → StartTime(0," + h + "," + m + ")（mm:ss 位）");
 
-            SetMediaClockTimer t = new SetMediaClockTimer();
-            t.setStartTime(new StartTime(0, h, m));
-            t.setUpdateMode(UpdateMode.PAUSE);
-            t.setAudioStreamingIndicator(AudioStreamingIndicator.PLAY);
+            String from = String.format(java.util.Locale.US, "%02d:%02d", h, m);
+            Log2.i(TAG, "计时器：显示到达时刻 " + clock + " → 两步法 freeze(" + from + ")");
+
+            out.add(freezeClockRpc(h, m, 0)[0]);     // ① COUNTUP 起表
+            out.add(freezeClockRpc(h, m, 0)[1]);     // ② PAUSE 停住
 
             lastClockTextSent = navClockText;        // ★ 真要发了才记
-            return t;
+            return out;
         }
 
-        // 歌曲模式：从播放位置起表
+        // 歌曲模式：从播放位置起表（COUNTUP 本身就会真正生效，不需要再来一条 PAUSE）
         lastClockTextSent = null;
-        if (song == null || !song.hasData() || !song.playing) return null;
+        if (song == null || !song.hasData() || !song.playing) return out;
 
         String key = song.title + "|" + song.artist;
         boolean songChanged = !key.equals(lastSongKey);
-        if (!songChanged && songClockStarted) return null;
+        if (!songChanged && songClockStarted) return out;
 
         long pos = song.positionMs;
         if (pos < 0) pos = 0;
@@ -1128,47 +1166,43 @@ public class StateRenderer {
         Log2.i(TAG, "启动播放计时 " + String.format(java.util.Locale.US,
                 "%02d:%02d:%02d", h, m, s));
 
-        return SetMediaClockTimer.countUpFromStartTime(
-                new StartTime(h, m, s), null, AudioStreamingIndicator.PLAY);
+        out.add(SetMediaClockTimer.countUpFromStartTime(
+                new StartTime(h, m, s), null, AudioStreamingIndicator.PLAY));
+        return out;
+    }
+
+    /**
+     * 「把时钟格定死在某个读数」的两条指令。
+     *
+     * <pre>
+     *   [0] COUNTUP(startTime)   车机开始走表
+     *   [1] PAUSE                停住（不带时间，带了也被忽略）
+     * </pre>
+     *
+     * 两条必须按顺序发（用 {@code sendSequentialRPCs}），中间不能插别的
+     * 时钟指令，否则第二条 PAUSE 停的会是别的表。
+     *
+     * @return 长度固定为 2 的数组
+     */
+    public SetMediaClockTimer[] freezeClockRpc(int h, int m, int s) {
+        SetMediaClockTimer up = SetMediaClockTimer.countUpFromStartTime(
+                clockStart(h, m, s), null, AudioStreamingIndicator.PLAY);
+        SetMediaClockTimer pause = SetMediaClockTimer.pauseWithPlayPauseIndicator(
+                AudioStreamingIndicator.PAUSE);
+        return new SetMediaClockTimer[]{up, pause};
     }
 
     /** 上次真正发给车机的 ETA 时刻（hh:mm） */
     private String lastEtaSent = null;
 
-    /**
-     * 车机拒绝过 ETA 借位写法后置 true —— 之后不再尝试用时钟格显示到达时刻。
+    /*
+     * 曾经这里有一套 etaClockRejected 兜底逻辑：车机拒了 ETA 就回落到
+     * mediaTrack 显示「13:58到」。那建立在错误的归因上 ——
+     * 以为"分钟位有上限"，实际是「单步 PAUSE + startTime」这个写法本身无效
+     * （见 §6.6.1）。现在改成了正确的两步法，兜底就不需要了。
      *
-     * <p>实车实测（2026-11-21 落盘日志）：</p>
-     * <pre>
-     *   StartTime(0,13,58) + PAUSE → REJECTED
-     *   StartTime(0, 0, 5) + PAUSE → SUCCESS
-     * </pre>
-     * 同样结构、只有数值不同，说明这台车机对 startTime 的取值有限制，
-     * 「借分钟位显示 hh:mm 到达时刻」这条路走不通。失败后就别反复发被拒的包了。</p>
+     * 留着这段注释是为了防止有人再"修"回去。
      */
-    private volatile boolean etaClockRejected = false;
-
-    /**
-     * 由发送层在收到 {@code SetMediaClockTimer} 的失败响应时回调。
-     *
-     * @param resultCode 车机返回的结果码字符串（REJECTED / INVALID_DATA …）
-     */
-    public void onClockRpcFailed(String resultCode) {
-        if (!etaClockRejected) {
-            etaClockRejected = true;
-            Log2.w(TAG, "⚠ 车机拒绝 ETA 借位显示（" + resultCode
-                    + "），改用 mediaTrack 显示到达时刻");
-            markDirty("etaClockRejected");
-        }
-    }
-
-    /** 车机拒绝过 ETA 借位写法时，时钟格回落到播放计时 */
-    public boolean isEtaClockRejected() { return etaClockRejected; }
-
-    /** 第 3 行右侧还要不要显示到达时刻（被拒之后就不显示了） */
-    private boolean etaClockUsable() {
-        return !etaClockRejected;
-    }
 
     /**
      * 这个新的 ETA 值要不要重发。

@@ -90,9 +90,19 @@ public final class SyncPlayCore {
 
             renderer.setLifecycle(lifecycle);
             // 渲染器的所有出站 RPC 都先到这里，再转发给当前挂着的发送者
-            renderer.setSender(msg -> {
-                StateRenderer.Sender s = sender;
-                if (s != null) s.send(msg);
+            renderer.setSender(new StateRenderer.Sender() {
+                @Override
+                public void send(com.smartdevicelink.proxy.RPCMessage msg) {
+                    StateRenderer.Sender s = sender;
+                    if (s != null) s.send(msg);
+                }
+
+                @Override
+                public void sendSequential(
+                        java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
+                    StateRenderer.Sender s = sender;
+                    if (s != null) s.sendSequential(msgs);
+                }
             });
 
             // 数据源：音乐通知 + 高德导航
@@ -176,15 +186,15 @@ public final class SyncPlayCore {
         // 用户计时器接管后，歌曲计时作废
         renderer.resetSongClock();
 
-        // ② 构造 RPC
-        SetMediaClockTimer t;
+        // ② 构造 RPC（可能是 0~2 条：暂停定格需要 COUNTUP + PAUSE 两步）
+        java.util.List<SetMediaClockTimer> list;
         try {
-            t = renderer.timerRpc(h, m, s, mode);
+            list = renderer.timerRpcList(h, m, s, mode);
         } catch (Exception e) {
             Log2.w(TAG, "构造计时器 RPC 失败: " + e.getMessage());
             return;
         }
-        if (t == null) return;
+        if (list == null || list.isEmpty()) return;
 
         // ③ 有连接才发
         StateRenderer.Sender sn = sender;
@@ -194,9 +204,14 @@ public final class SyncPlayCore {
             return;
         }
         timerPendingSend = false;
-        t.setCorrelationID(nextCorr());
-        sn.send(t);
-        Log2.i(TAG, "计时器已发送: " + mode);
+        for (SetMediaClockTimer t : list) t.setCorrelationID(nextCorr());
+        if (list.size() == 1) {
+            sn.send(list.get(0));
+        } else {
+            // 两步定格必须严格按序（COUNTUP 起表 → PAUSE 停住）
+            sn.sendSequential(list);
+        }
+        Log2.i(TAG, "计时器已发送: " + mode + "（" + list.size() + " 条）");
     }
 
     /**
@@ -267,15 +282,32 @@ public final class SyncPlayCore {
     /**
      * 把「当前该显示的时间」推给车机。
      *
-     * songClockRpc() 内部自带门槛（ETA 没变就不发、歌没换就不重发），
-     * 所以可以放心被高频调用。发送者不在时这里是空操作。
+     * <h3>为什么是"多条"</h3>
+     * 车机的 `PAUSE` 会忽略 `startTime`，只暂停当前正在跑的那块表
+     * （实车 RPC Builder 验证，见 AGENTS.md §6.6.1）。
+     * 所以「把那一格定在某个读数」必须两步：
+     * <pre>
+     *   ① COUNTUP(startTime)  起表
+     *   ② PAUSE               停住
+     * </pre>
+     * `songClockRpcList()` 返回 0~2 条，这里按顺序发。
+     *
+     * <p>内部自带门槛（ETA 没变就不发、歌没换就不重发），可以放心高频调用。
+     * 发送者不在时是空操作。</p>
      */
     private void pushClock() {
-        com.smartdevicelink.proxy.rpc.SetMediaClockTimer clock = renderer.songClockRpc();
-        if (clock == null) return;
+        java.util.List<com.smartdevicelink.proxy.rpc.SetMediaClockTimer> list =
+                renderer.songClockRpcList();
+        if (list == null || list.isEmpty()) return;
         StateRenderer.Sender s = sender;
         if (s == null) return;
-        s.send(clock);
+
+        if (list.size() == 1) {
+            s.send(list.get(0));
+        } else {
+            // 多条必须严格按序（先 COUNTUP 起表、再 PAUSE 停住），否则会停错表
+            s.sendSequential(list);
+        }
     }
 
     // ---------------- 数据源回调 ----------------
