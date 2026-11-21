@@ -128,6 +128,24 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnOpenLog).setOnClickListener(v -> openLogScreen());
         findViewById(R.id.btnCharTest).setOnClickListener(v -> showCharTestDialog());
 
+        /*
+         * 手动唤醒车机发现。
+         *
+         * 本车机（SYNC 1.1）不会自动发现 App，必须人在车机上点「查找移动应用」；
+         * 而 RouterService 的前台窗口只有 10~20 秒（那条带倒计时的 SDL 通知），
+         * 错过就退回后台，之后车机怎么找都找不到。
+         *
+         * 这个按钮让 Router 重新进前台、倒计时重开，用户趁这段时间去车机上查找即可。
+         */
+        findViewById(R.id.btnWakeRouter).setOnClickListener(v -> {
+            boolean ok = com.xigaigai.syncglance.receiver.SdlReceiver.wakeRouter(this);
+            if (ok) {
+                toast("已重开等待窗口（约 20 秒）—— 现在去车机上点「查找移动应用」");
+            } else {
+                toast("唤醒失败，请查看信息页日志");
+            }
+        });
+
         startSdlService();
 
         /*

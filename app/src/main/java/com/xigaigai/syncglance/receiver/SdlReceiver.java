@@ -109,6 +109,56 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     }
 
     /**
+     * 手动唤醒 RouterService，重新打开「等待车机连接」的前台窗口。
+     *
+     * <h3>为什么需要这个</h3>
+     * 本车机（SYNC 1.1）**不会自动发现 App**，必须用户在车机上点「查找移动应用」。
+     * 而 RouterService 的前台窗口只有 10~20 秒（那条带倒计时的 SDL 通知），
+     * 错过就退到后台，之后车机再查找也找不到。
+     *
+     * <p>于是加了这个「手动开窗」：用户点一下，Router 重新进前台、
+     * 倒计时重新开始，这时候在车机上点「查找移动应用」就能连上。</p>
+     *
+     * <h3>实现依据（SdlRouterService 源码）</h3>
+     * {@code onStartCommand} 里：
+     * <pre>
+     *   if (intent.getBooleanExtra(FOREGROUND_EXTRA, false)) {
+     *       if (!isPrimaryTransportConnected()) {
+     *           enterForeground("Waiting for connection...", timeout, false);
+     *           resetForegroundTimeOut(timeout);
+     *       } else {
+     *           enterForeground(createConnectedNotificationText(), 0, true);
+     *       }
+     *   }
+     * </pre>
+     * 所以只要带 {@link TransportConstants#FOREGROUND_EXTRA} = true 启动它即可。
+     *
+     * <p>用 {@code startForegroundService} 是安全的：这条路径里库自己会调
+     * {@code enterForeground}，不会触发「5 秒没 startForeground」的 ANR。</p>
+     *
+     * @return true = 请求已发出
+     */
+    public static boolean wakeRouter(Context context) {
+        if (context == null) return false;
+        try {
+            Intent i = new Intent(context, SyncRouterService.class);
+            i.setAction(TransportConstants.ROUTER_SERVICE_ACTION);
+            i.putExtra(TransportConstants.FOREGROUND_EXTRA, true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(i);
+            } else {
+                context.startService(i);
+            }
+            Log2.i(TAG, "已请求唤醒 RouterService（重新打开等待窗口）");
+            return true;
+        } catch (Exception e) {
+            Log2.w(TAG, "唤醒 RouterService 失败: "
+                    + e.getClass().getSimpleName() + " " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * 尝试走官方 Android 12+ 的 PendingIntent 启动方式。
      *
      * @return true = 已经通过 PendingIntent 启动，调用方不要再自己 start
