@@ -65,6 +65,8 @@ public class SdlReceiver extends SdlBroadcastReceiver {
      *   12:49:37.867  [SdlReceiver] ★ onSdlEnabled —— 车机已连通 RouterService
      *   12:49:37.873  [SdlReceiver] 已通过 PendingIntent 启动 SdlService
      *   （之后没有任何 [SYNC] SyncPlay 服务创建）
+     *   ★ 上面的 [SYNC] 是当时的日志 TAG，2026-11-21 起已改名 [SyncPlay]
+     *     （SYNC 是车机的设备名，容易看混）。
      *   12:50:11.415  [Boot] ACL_DISCONNECTED      ← 车机等不及，超时
      * </pre>
      *

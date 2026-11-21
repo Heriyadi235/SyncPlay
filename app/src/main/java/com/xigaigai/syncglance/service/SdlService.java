@@ -48,7 +48,15 @@ import java.util.Vector;
  */
 public class SdlService extends Service {
 
-    private static final String TAG = "SYNC";
+    /*
+     * 日志 TAG。
+     *
+     * ★ 2026-11-21 从 "SYNC" 改成 "SyncPlay"：SYNC 是车机的设备名
+     *   （蓝牙里就叫「SYNC 」），日志里同时出现 `[SYNC] 服务创建` 和
+     *   `[Boot] SYNC 车机已断开` 时很容易看混 —— 前者指本应用，后者指车机。
+     *   改成 SyncPlay 之后语义唯一。
+     */
+    private static final String TAG = "SyncPlay";
     private static final String CHANNEL_ID = "syncglance";
     private static final int NOTIF_ID = 1;
 
