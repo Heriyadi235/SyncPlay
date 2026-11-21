@@ -686,6 +686,24 @@ public class StateRenderer {
         f.f4 = Romaji.convert(f.f4);
         f.mediaTrack = Romaji.convert(f.mediaTrack);
 
+        /*
+         * ★ 车机拒绝「借分钟位显示到达时刻」之后的兜底。
+         *
+         *   时钟格只能放 mm:ss，而车机连 StartTime(0,13,58) 都判 REJECTED
+         *   （实车日志见 onClockRpcFailed 的注释），那条路彻底走不通。
+         *   但 ETA 是这个应用的核心信息，不能就这么没了 ——
+         *   改放到 mediaTrack（第 3 行左侧，8 字符宽）："13:58到" 正好 6 个半角。
+         *
+         *   只在「导航中 + 导航模式」时占用这一格；那时 mediaTrack 本来就是
+         *   剩余距离，两个信息选 ETA（用户明确要求的）。
+         */
+        if (etaClockRejected && (st == State.B_NAV_ONLY || st == State.D_BOTH)) {
+            String eta = navClockText;
+            if (eta != null && !eta.isEmpty()) {
+                f.mediaTrack = eta + "到";
+            }
+        }
+
         // ★ 计时器占用时钟格时，track 前加 §（其他状态不加，见 statusPrefix 注释）
         if (f.mediaTrack != null && !f.mediaTrack.isEmpty()) {
             f.mediaTrack = statusPrefix() + f.mediaTrack;
@@ -754,7 +772,8 @@ public class StateRenderer {
         }
 
         // ② 导航 ETA：借 mm:ss 位显示到达时刻（hh 塞进分钟位）
-        String eta = navClockText;
+        //    车机拒过就跳过 —— 否则预览会显示一个车机上根本没有的时刻。
+        String eta = etaClockUsable() ? navClockText : null;
         if (eta != null && eta.indexOf(':') > 0) {
             try {
                 int c = eta.indexOf(':');
@@ -1041,8 +1060,8 @@ public class StateRenderer {
         if (timerRunning) return null;
         if (sender == null) return null;
 
-        // 导航模式优先显示 ETA
-        if (navClockText != null && !navClockText.isEmpty()) {
+        // 导航模式优先显示 ETA（车机拒过就不再尝试，见 onClockRpcFailed）
+        if (etaClockUsable() && navClockText != null && !navClockText.isEmpty()) {
             // ★ 只有"确实要发出去"时才更新 lastClockTextSent。
             //
             //   以前的写法是先赋值、再检查，只要中间任一步 return（etaClockNow 取不到值、
@@ -1115,6 +1134,41 @@ public class StateRenderer {
 
     /** 上次真正发给车机的 ETA 时刻（hh:mm） */
     private String lastEtaSent = null;
+
+    /**
+     * 车机拒绝过 ETA 借位写法后置 true —— 之后不再尝试用时钟格显示到达时刻。
+     *
+     * <p>实车实测（2026-11-21 落盘日志）：</p>
+     * <pre>
+     *   StartTime(0,13,58) + PAUSE → REJECTED
+     *   StartTime(0, 0, 5) + PAUSE → SUCCESS
+     * </pre>
+     * 同样结构、只有数值不同，说明这台车机对 startTime 的取值有限制，
+     * 「借分钟位显示 hh:mm 到达时刻」这条路走不通。失败后就别反复发被拒的包了。</p>
+     */
+    private volatile boolean etaClockRejected = false;
+
+    /**
+     * 由发送层在收到 {@code SetMediaClockTimer} 的失败响应时回调。
+     *
+     * @param resultCode 车机返回的结果码字符串（REJECTED / INVALID_DATA …）
+     */
+    public void onClockRpcFailed(String resultCode) {
+        if (!etaClockRejected) {
+            etaClockRejected = true;
+            Log2.w(TAG, "⚠ 车机拒绝 ETA 借位显示（" + resultCode
+                    + "），改用 mediaTrack 显示到达时刻");
+            markDirty("etaClockRejected");
+        }
+    }
+
+    /** 车机拒绝过 ETA 借位写法时，时钟格回落到播放计时 */
+    public boolean isEtaClockRejected() { return etaClockRejected; }
+
+    /** 第 3 行右侧还要不要显示到达时刻（被拒之后就不显示了） */
+    private boolean etaClockUsable() {
+        return !etaClockRejected;
+    }
 
     /**
      * 这个新的 ETA 值要不要重发。

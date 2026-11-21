@@ -127,6 +127,13 @@ public class MainActivity extends AppCompatActivity {
         });
         findViewById(R.id.btnOpenLog).setOnClickListener(v -> openLogScreen());
         findViewById(R.id.btnCharTest).setOnClickListener(v -> showCharTestDialog());
+        findViewById(R.id.btnClockProbe).setOnClickListener(v -> {
+            SdlService s = SdlService.getInstance();
+            if (s == null) { toast("服务未启动（需车机连接）"); return; }
+            if (!s.isHmiFull()) { toast("还没连上车机（需要 HMI_FULL）"); return; }
+            toast("开始探测，结果看日志里的 resultCode");
+            s.probeClockRange();
+        });
 
         /*
          * 手动唤醒车机发现。

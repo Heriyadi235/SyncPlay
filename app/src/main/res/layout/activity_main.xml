@@ -228,6 +228,15 @@
             android:text="字符测试（找出车机认得的字符）"
             android:textSize="13sp" />
 
+        <!-- ETA 借位探测：车机连 StartTime(0,13,58) 都判 REJECTED，
+             这里一次发 5 组不同数值，找出车机接受的范围。需 HMI_FULL。 -->
+        <Button
+            android:id="@+id/btnClockProbe"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="时钟范围探测（ETA 借位能不能用）"
+            android:textSize="13sp" />
+
         <!-- 手动唤醒 Router：重新打开「等待车机连接」的 20 秒窗口。
              本车机不会自动发现 App，必须在窗口内去车机上点「查找移动应用」。 -->
         <Button

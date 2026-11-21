@@ -619,6 +619,20 @@ public class SdlService extends Service {
                     if (!response.getSuccess()) {
                         Log2.w(TAG, response.getFunctionName() + " ← " + response.getResultCode()
                                 + (response.getInfo() == null ? "" : " " + response.getInfo()));
+
+                        /*
+                         * ★ 时钟指令被拒 → 通知渲染器改用兜底显示。
+                         *
+                         *   实车实测：SetMediaClockTimer 用 StartTime(0,13,58)
+                         *   （借分钟位显示到达时刻）会被判 REJECTED，而
+                         *   StartTime(0,0,5) 是 SUCCESS。这条路上显示不出 ETA，
+                         *   所以要让 renderer 回落到 mediaTrack 显示「13:58到」，
+                         *   并停止再发注定被拒的包。
+                         */
+                        if (req instanceof com.smartdevicelink.proxy.rpc.SetMediaClockTimer
+                                && renderer != null) {
+                            renderer.onClockRpcFailed(String.valueOf(response.getResultCode()));
+                        }
                     }
                 }
             });
@@ -628,6 +642,46 @@ public class SdlService extends Service {
         } catch (Exception e) {
             Log2.e(TAG, "发送失败: " + req.getFunctionName(), e);
         }
+    }
+
+    /**
+     * ETA 借位探测：一次发 5 组不同的 {@code StartTime}，看车机接受哪些。
+     *
+     * <p>背景（实车落盘日志 2026-11-21）：</p>
+     * <pre>
+     *   StartTime(0,13,58) + PAUSE → REJECTED
+     *   StartTime(0, 0, 5) + PAUSE → SUCCESS
+     * </pre>
+     * <p>同样结构只有数值不同，说明车机对 startTime 的取值范围有限制。
+     * 这个探测就是为了找出边界，从而决定"到达时刻能不能借分钟位显示"。</p>
+     *
+     * <p>结果看日志里的 resultCode（SUCCESS / REJECTED / INVALID_DATA）。</p>
+     */
+    public void probeClockRange() {
+        int[][] cases = {
+                {0, 0, 58},    // ① 分钟=0，秒=58   （已知 SUCCESS 的邻域）
+                {0, 1, 0},     // ② 分钟=1
+                {0, 9, 59},    // ③ 分钟=9
+                {0, 13, 58},   // ④ 分钟=13          （已知 REJECTED）
+                {0, 23, 59},   // ⑤ 分钟=23（23:59 这种到达时刻）
+        };
+        Log2.i(TAG, "★ ETA 借位探测开始，共 " + cases.length + " 组");
+        for (int i = 0; i < cases.length; i++) {
+            final int[] c = cases[i];
+            final int idx = i + 1;
+            main.postDelayed(() -> {
+                SetMediaClockTimer t = new SetMediaClockTimer();
+                t.setStartTime(new StartTime(0, c[0], c[1]));
+                t.setUpdateMode(UpdateMode.PAUSE);
+                t.setAudioStreamingIndicator(AudioStreamingIndicator.PLAY);
+                t.setCorrelationID(nextCorr());
+                Log2.i(TAG, "探测 " + idx + "/" + cases.length
+                        + " → StartTime(0," + c[1] + "," + c[2] + ") = "
+                        + String.format(java.util.Locale.US, "%02d:%02d", c[1], c[2]));
+                sendRpc(t);
+            }, i * 2500L);     // 间隔 2.5 秒，让每条响应都进来
+        }
+        Log2.i(TAG, "探测发完，请对照上面对应的 ← resultCode");
     }
 
     /**
