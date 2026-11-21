@@ -580,8 +580,10 @@ public class StateRenderer {
         f.f4 = Romaji.convert(f.f4);
         f.mediaTrack = Romaji.convert(f.mediaTrack);
 
-        // ★ track 行前面加状态指示符（看「这一行装的是什么」，track 为空时不加）
-        f.mediaTrack = statusPrefix(f.mediaTrack) + f.mediaTrack;
+        // ★ 计时器占用时钟格时，track 前加 §（其他状态不加，见 statusPrefix 注释）
+        if (f.mediaTrack != null && !f.mediaTrack.isEmpty()) {
+            f.mediaTrack = statusPrefix() + f.mediaTrack;
+        }
 
         // ★ 第 3 行右侧：计时器「指令」，不是算好的读数
         f.clock = currentClockInstruction();
@@ -654,24 +656,35 @@ public class StateRenderer {
             } catch (Exception ignored) { }
         }
 
-        // ③ 播放进度：从当前位置起表，车机自己走
-        if (song != null && song.hasData() && song.playing && song.positionMs > 0) {
-            long pos = song.positionMs;
+        /*
+         * ③ 歌曲时间：在播就从当前播放位置起表；**暂停就定格**。
+         *
+         *   ★ 暂停必须显式走 PAUSE，不能靠下面 ④「沿用还在走的指令」——
+         *     否则暂停后预览里的秒数会一直往上爬（实测的 bug）。
+         *     车机真实行为也是定格：App 不发新指令，那一格就停在最后读数。
+         *
+         *   ★ 同时把条件放宽成「只要有歌数据」：位置为 0 也算（显示 00:00），
+         *     否则刚起播那一瞬间会掉进 ④，显示出上一条不相干的指令。
+         */
+        if (song != null && song.hasData()) {
+            long pos = Math.max(0, song.positionMs);
             int m = (int) ((pos / 60_000) % 60);
             int s = (int) ((pos / 1000) % 60);
-            return reuseClock(ClockInstruction.Mode.COUNTUP, 0, m, s, now);
+            if (song.playing) {
+                return reuseClock(ClockInstruction.Mode.COUNTUP, 0, m, s, now);
+            }
+            // 暂停 / 停止：定格在最后已知位置
+            return reuseClock(ClockInstruction.Mode.PAUSE, 0, m, s, now);
         }
 
         /*
-         * ④ 没有任何新指令时：**沿用上一条还在走的指令**。
+         * ④ 连歌都没有 → 不留任何旧指令。
          *
-         *   车机那一格不会因为歌曲暂停而清空 —— 它只会按最后一条指令继续走，
-         *   直到我们显式发 CLEAR。预览器照同样的规则处理，才不会出现
-         *   「暂停后那一格突然空了」的假象。
+         *   ★ 这里以前会 `return last`（沿用还在走的那条），后果是：
+         *     「清零后又没有歌」→ 预览里仍挂着一个一直在爬的数字；
+         *     用户计时器清零后不回落到音乐时间，也是它带偏的。
+         *     用户计时器的暂停态已经在 ① 里处理，这里没有需要沿用的东西了。
          */
-        ClockInstruction last = lastClock;
-        if (last != null && last.isRunning()) return last;
-
         return ClockInstruction.none();
     }
 
@@ -767,20 +780,29 @@ public class StateRenderer {
 
     /** 记录计时器状态，供预览模拟走表 */
     public void setTimerState(int h, int m, int s, String mode) {
-        timerH = h;
-        timerM = m;
-        timerS = s;
-        timerCountdown = "COUNTDOWN".equals(mode);
-
+        /*
+         * ★ 只有「开始」才允许重置方向与起始值。
+         *
+         *   之前这四个字段在方法最前面无条件赋值，于是点「暂停计时」时
+         *   MainActivity 传的 (0,0,0,"PAUSE") 会把倒计时的起始值冲成 0、
+         *   把 timerCountdown 冲成 false —— timerElapsedSeconds() 就不再走
+         *   "剩余 = total - elapsed" 那条路，倒计时暂停后会显示成已过秒数
+         *   （比如 5 分钟走了 10 秒，显示 00:10 而不是 04:50）。
+         */
         switch (mode) {
             case "COUNTUP":
             case "COUNTDOWN":
+                timerH = h;
+                timerM = m;
+                timerS = s;
+                timerCountdown = "COUNTDOWN".equals(mode);
                 timerStartMillis = System.currentTimeMillis();
                 timerPausedAt = 0;
                 timerRunning = true;
                 timerActive = true;
                 break;
             case "PAUSE":
+                // 暂停只是"停止走秒"，方向和起始值一律不动
                 timerPausedAt = System.currentTimeMillis();
                 timerRunning = false;
                 timerActive = true;          // ★ 暂停 = 仍然占屏，只是不走秒
@@ -1096,27 +1118,16 @@ public class StateRenderer {
     }
 
     /**
-     * @param trackText 这一行实际要显示的内容（<b>不含</b>指示符）
+     * track 行前面的状态指示符。
+     *
+     * <b>只用一个字符：{@code §}（U+00A7）</b>，而且**只在计时器占用媒体时钟格时**出现。
+     *
+     * 为什么不用别的：实车逐组测过（见 AGENTS.md 6.8），箭头 / 三角 / 播放暂停符
+     * 车机一律渲染成一个圆点，只有 Latin-1 那批排版符号有字形 —— `§` 正在其中。
+     * 其他状态（导航 / 歌曲）干脆不加，避免出现满屏圆点。
      */
-    private String statusPrefix(String trackText) {
-        // ① 计时器最优先 —— 哪怕 track 本身是空的也要显示沙漏。
-        //    用户明确要求：计时器激活时，状态指示符始终是计时器图标。
-        if (timerActive) return Glyphs.clock();
-
-        // ② track 是空的 → 不加内容类指示符。
-        //    否则欢迎页上空荡荡一行前面孤零零挂个箭头/播放符，很怪。
-        if (trackText == null || trackText.isEmpty()) return "";
-
-        // ③ 按 track 里实际装的内容决定
-        switch (getTrackKind()) {
-            case NAV:
-                return Glyphs.arrow(bearingArrow());
-            case SONG:
-                return Glyphs.play(playingNow());
-            case NONE:
-            default:
-                return "";
-        }
+    private String statusPrefix() {
+        return timerActive ? "\u00a7" : "";
     }
 
     /**
