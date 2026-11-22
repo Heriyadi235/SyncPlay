@@ -22,7 +22,7 @@
 | 车机 | SYNC 1.1，MFD4 四寸屏，`graphicSupported = false` |
 | 协议 | SDL 2.1（`syncMsgVersion 2.0.0`），蓝牙 SPP 传输 |
 | SDK | `sdl_android:5.8.0` + `MultiplexTransportConfig`（4.12.2 的旧实现见 `legacy/sdl4` 分支） |
-| 构建 | AGP 9.5.1 / Gradle 9.6 / JDK 11 / `compileSdk 37`、`minSdk 24`、**`targetSdk 35`** |
+| 构建 | AGP 9.5.1 / Gradle 9.6.0 / `compileSdk 37`、`minSdk 24`、**`targetSdk 35`**；Java 源/目标级别 11 |
 
 ## 能做什么
 
@@ -40,19 +40,28 @@
 - **计时器**：正计时 / 倒计时（上限 59:59）/ 暂停 / 清零，暂停时数字定格在屏上
 - **时钟格**：`SetMediaClockTimer` 只支持 `mm:ss`，ETA 借用分秒位显示到达时刻
 - **交互**：3 个父菜单 + 12 个子项、15 个物理键（OK 与 PLAY_PAUSE 是同一物理键，已做别名去重）、底栏软键
-- **调试**：手机端车机屏幕预览、通信日志（含原始 JSON，可复制/分享）、字符探测表
+- **调试**：手机端车机屏幕预览、通信日志（含原始 JSON，可复制/分享）
 
 ## 数据流
 
 ```
-网易云 MediaSession ─NotificationCatcher─┐
-高德 AmapLink (AIDL) ─AmapLinkClient─────┤
-music.163.com / lrclib ─LyricManager─────┤
-                                         ▼
-                    StateRenderer（四状态 + 1 秒节流）──Show/SetMediaClockTimer──▶ 车机
-                                         ▲
-                    SyncLifecycle（只有 HMI_FULL 才允许发 RPC）
+┌─ SyncPlayCore（应用级单例，主进程一份）──────────────────────────┐
+│                                                                  │
+│  NotificationCatcher ─→ NowPlaying    （网易云等 MediaSession）   │
+│  AmapLinkClient      ─→ Navigation    （高德 AIDL + AES-GCM）     │
+│  LyricManager        ─→ 歌词           （music.163.com / lrclib）  │
+│                          ↓                                       │
+│  StateRenderer（四状态 + 1 秒节流）                               │
+│  SyncLifecycle（只有 HMI_FULL 才允许发 RPC）                      │
+└───────────────────────────────┬──────────────────────────────────┘
+                                │ attachSender() 挂上 / detachSender() 摘除
+                                ▼
+                           SdlService ──Show / SetMediaClockTimer──▶ 车机
 ```
+
+**关键解耦**：数据采集与渲染都在 `SyncPlayCore`，`SdlService`（连接层）只是「借用」
+一个出站通道。所以**车机断开、服务 `stopSelf` 之后，手机端的屏幕预览和歌词照常工作**
+—— 这也是为什么 `MainActivity` 不依赖 `SdlService` 实例。
 
 ## 构建
 
@@ -105,12 +114,15 @@ $pkg = "com.xigaigai.syncglance"
 
 ```
 app/src/main/java/com/xigaigai/syncglance/
+├── SyncGlanceApp 应用入口（进程名过滤、崩溃日志兜底、启动补连接探测）
 ├── activity/   MainActivity（控制面板）、LogActivity（日志 + 屏幕预览）
+├── core/       SyncPlayCore（应用级单例：数据采集/渲染与连接层解耦）
 ├── service/    SdlService（连接/菜单/按键）、NotificationCatcher、CommandRouter、KeyMap
-├── display/    StateRenderer（四状态渲染）、SyncLifecycle、ScreenPreviewView、Glyphs、CharProbe
+├── display/    StateRenderer（四状态渲染）、SyncLifecycle、ConnectionStatus、ScreenFrame、
+│               ScreenPreviewView、ClockInstruction、Glyphs
 ├── lyric/      LyricManager（降级链 + 四级缓存）、SyncLyric（成品歌词）、Romaji（假名转写）、NeteaseLyric、TitleNorm、Lrc
 ├── nav/        AmapLinkClient（高德 AIDL）、LinkEnvelope（信封解密）
-├── receiver/   BootReceiver、SdlReceiver、SyncRouterService（SDL 官方链路）
+├── receiver/   SdlReceiver、BootReceiver、SdlRouterService（SDL 官方链路）
 ├── media/      NeteaseControl（系统媒体键）
 ├── model/      NowPlaying、Navigation
 └── util/       Log2（日志中枢）、Kana（假名罗马音底层表 + 降级兜底）
@@ -125,7 +137,7 @@ app/src/main/java/com/xigaigai/syncglance/
 | [docs/todo.md](docs/todo.md) | 待办：锁屏界面（Ford 必测项）、VR Help、PRESET 绑定、权限缓存等 |
 | [docs/device-connection.md](docs/device-connection.md) | 设备型号、adb 路径、安装/调试命令、启动失败对照表 |
 | [docs/连接可靠性排查.md](docs/连接可靠性排查.md) | **连接问题必读**：秒退根因、受控重试、唤醒链路卡口、复测数据 |
-| [docs/通知移除与存活权衡.md](docs/通知移除与存活权衡.md) | 为什么去掉常驻通知、代价、验证清单、**可照抄的回退步骤** |
+| [docs/通知移除与存活权衡.md](docs/通知移除与存活权衡.md) | 通知「移除→恢复」全过程：两条通知的 SDL 固有设计依据、**文案状态矩阵**、图标规格、可回退步骤 |
 | [docs/两分支维护.md](docs/两分支维护.md) | `main`（SDL 5.8）与 `legacy/sdl4`（4.12.2）的同步规则与有意差异 |
 | [docs/sdl5-机制与生命周期.md](docs/sdl5-机制与生命周期.md) | 5.x 与 4.x 的 API 对照、按 FunctionID 注册回调等机制差异 |
 | [docs/sdl生命周期-场景对照.md](docs/sdl生命周期-场景对照.md) | 官方要求逐条对照 + 实车场景时间线 |
