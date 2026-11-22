@@ -160,7 +160,7 @@ android.enableJetifier=true                       // gradle.properties 里
 ```
 
 **SDL 官方链路（2026-11-20 加入，缺了会「车机连不上」）**：
-- `receiver/SyncRouterService` —— 继承库的 `SdlRouterService`，Manifest 里 action 必须是
+- `receiver/SdlRouterService` —— 继承库的 `SdlRouterService`，Manifest 里 action 必须是
   `com.smartdevicelink.router.service`。负责监听 RFCOMM + 注册 SDP 记录。
 - `receiver/SdlReceiver` —— 继承库的 `SdlBroadcastReceiver`，实现
   `defineLocalSdlRouterClass()` 和 `onSdlEnabled()`。

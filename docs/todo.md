@@ -29,7 +29,7 @@
 | ✅ | **倒计时上限 59:59** | 11-20 | 分钟滚轮 99→59，配 `clockTime()` 统一夹紧 |
 | ✅ | **软键 6 个实测可用** | 11-20 | 车机底部 3 格 + `>` 翻页，送 2~6 个均 SUCCESS |
 | ✅ | **指示符全部关闭** | 11-20 | 车机字库不认 ⧗▶⏸箭头，统一收进 `Glyphs` 开关 |
-| ✅ | **字符测试按钮** | 11-20 | 16 组字符用 ScrollableMessage 逐组探测，含假名/半角假名/兼容汉字 |
+| ⛔ | ~~字符测试按钮~~ | 11-20 建 / 11-22 移除 | 16 组字符用 ScrollableMessage 逐组探测；调试功能清理时随 `CharProbe` 一起删（`130d078`） |
 | ✅ | **车机名统一 SyncPlay** | 11-20 | `APP_NAME` 改 SyncPlay；手机桌面仍是「西改改的Sync」 |
 | ✅ | **软键上限提到 12** | 11-20 | `SOFT_KEY_MAX = 12`，测试车机最多认几个 |
 | ✅ | **SDL 官方生命周期** | 11-20 | 加 `SyncRouterService` + `SdlReceiver` + `queryForConnectedService`，废弃看门狗 |
@@ -247,7 +247,8 @@ OnLockScreenStatus { showLockScreen: REQUIRED, driverDistraction: true, hmiLevel
 - [ ] **倒计时设 59:59，车机是否接受并正常倒数**
 - [ ] **车机标题栏是否变成 `SyncPlay`**（appName 已改）
 - [ ] **软键测试一路点到 12 个**：车机从第几个开始不认？翻页键长什么样？
-- [ ] **字符测试 16 组逐组看**：哪些有字形？重点看第 4~7 组假名、第 9 组兼容汉字
+- [ ] ~~**字符测试 16 组逐组看**~~：工具已在 `130d078` 移除；要复测需先加回 `CharProbe`。
+      当时的结论已记在 `docs/development.md`
 - [ ] **上车时先别开 App**，等车机显示「连接中」，再打开 App 看能否补连
 - [ ] **仅歌曲模式下第 1 屏的歌词能不能一直看下去**（车机不再跳回歌名歌手）
 - [ ] **通知栏文案是否跟着状态走**：`Waiting for connection (…)` → `Connecting through SDL (…)`

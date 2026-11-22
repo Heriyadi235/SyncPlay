@@ -4,7 +4,7 @@
 > 出问题时一眼定位在哪一层、是不是我们偏离了官方。
 >
 > **职责**（2026-11-21 起）：本项目 SDL 生命周期控制由我专门负责。
-> 动 `SdlService` / `SdlReceiver` / `BootReceiver` / `SyncRouterService` 之前先读这份文件。
+> 动 `SdlService` / `SdlReceiver` / `BootReceiver` / `SdlRouterService` 之前先读这份文件。
 >
 > **2026-11-21 重要更新**：官方文档原文（6 份）已由用户提供，本文从"二手转述"
 > 升级为**有原文依据**。原文要点见第 1、2 节，风险见第 7 节。
@@ -126,13 +126,13 @@ sdl.router.startservice
 | 10 | `onSystemInfoReceived` 必须返回 `true`（AS 默认生成 false，会导致连不上） | **Must** | 返回 `true` | ✅ |
 | 11 | `SdlBroadcastReceiver` 必须 `exported` | **Must** | 是 | ✅ |
 | 12 | 覆写 `onReceive` 必须调 `super.onReceive` | **Must** | 我们**没覆写** `onReceive`，只覆写 `onSdlEnabled` | ✅ 不适用 |
-| 13 | `defineLocalSdlRouterClass()` 返回本地 Router 类 | **Must** | 返回 `SyncRouterService.class` | ✅ |
+| 13 | `defineLocalSdlRouterClass()` 返回本地 Router 类 | **Must** | 返回 `SdlRouterService.class` | ✅ |
 | 14 | 本地 Router 类**必须命名为 `SdlRouterService`** | **Must** | 已改名（原 `SyncRouterService`） | ✅ 2026-11-21 落实 |
 | 15 | 本地 Router 类必须与 `SdlReceiver` **同包** | **Must** | 都在 `receiver` 包 | ✅ |
 | 16 | Router Service 的 intent-filter `com.smartdevicelink.router.service` | **Must** | 有 | ✅ |
 | 17 | Router Service 必须在 `com.smartdevicelink.router` 进程 | **Must** | `android:process="com.smartdevicelink.router"` | ✅ |
 | 18 | `sdl_router_version` meta-data | 要求 | 有（`@integer/sdl_router_service_version_value`） | ✅ |
-| 19 | `onSdlEnabled` 里 **S 及以上用 PendingIntent** 启动 | **Must**（API 31+） | ⚠ **仍偏离**：统一用 `startForegroundService`，PendingIntent 路径未恢复 | 有意偏离，理由见注② |
+| 19 | `onSdlEnabled` 里 **S 及以上用 PendingIntent** 启动 | **Must**（API 31+） | ⚠ **无法落实（库侧）**：库给的 PendingIntent 不含 component，指不到 `SdlService`；改用 `startForegroundService` | 不是"有意偏离"，是**照做也没用**，见注② |
 | 20 | **API 34+ 要先检查 `AndroidTools.hasForegroundServiceTypePermission(context)`**，没有就 return | **Must**（API 34+） | ✅ 已恢复 | ✅ 2026-11-22 恢复前台时一并恢复 |
 | 21 | `getSdlServiceName()` 默认返回 `"SdlService"`，类名不同要覆写 | Note | 我们的类就叫 `SdlService`，默认值正确 | ✅ |
 | 22 | `MultiplexTransportConfig` 连车机 | 要求 | `new MultiplexTransportConfig(ctx, APP_ID)` | ✅ |
@@ -160,24 +160,53 @@ sdl.router.startservice
 这条二选一关系的价值在于：如果哪天又想去掉通知，必须同时去掉前台状态，
 并接受后台存活变弱（细节见 `docs/通知移除与存活权衡.md` 第六节）。
 
-### 注②：第 19 条（S+ 用 PendingIntent 启动）为什么仍偏离
+### 注②：第 19 条为什么「无法落实」—— 库给的 PendingIntent 指不到我们的服务
 
-官方这条是 **Must**，目的是**绕开 Android 12+ 对「后台启动前台服务」的限制**。
-我们目前仍只走 `startForegroundService`，理由：
+官方这条是 **Must**，目的是**绕开 Android 12+ 对「后台启动前台服务」的限制**：
+Router 在 `sdl.router.startservice` 广播里塞一个
+`PendingIntent.getForegroundService(...)`，App 收到后 `send()` 它来启动自己的服务。
 
-1. **它历史上从未真正拉起过 `SdlService`**：2026-11-21 实车日志里
-   `PendingIntent.send()` 返回成功（没抛 `CanceledException`），但
-   `SdlService.onCreate` 压根没执行，车机侧最后超时。
-   （Router 给的是 `PendingIntent.getForegroundService(...)`，而目标 Intent
-   只有 `setPackage`，没有 component。）
-2. **结构上不需要额外保险**：`sdl.router.startservice` 是 Router 自己发出的，
-   所以 `onSdlEnabled` 到达时 Router 必然已在跑，且它是**同 uid 的前台服务**
-   → 整个 uid 不处于「后台」状态。
-3. 2026-11-22 四轮实测全部通过（`连接可靠性排查.md` §11.1），
-   恢复前后都没出现后台启动被拦。
+**问题：那个 PendingIntent 的目标 Intent 里没有我们的组件。**
+反编译 `sdl_android 5.8.0` 的 `SdlRouterService`（发送广播处）：
 
-⚠ **仍需留意**：这条是官方 **Must**。若某天在别的机型/ROM 上出现
-`ForegroundServiceStartNotAllowedException`，第一件事就是补回 PendingIntent 路径。
+```java
+Intent svc = new Intent();                  // 空 Intent
+svc.setPackage(getPackageName());           // 只设了包名
+PendingIntent pi = PendingIntent.getForegroundService(
+        ctx, (int) System.currentTimeMillis(), svc, 0x02000008);
+intent.putExtra("pending_intent", pi);      // 塞进广播
+```
+
+**没有 component、没有 action。** 而我们的 `SdlService` 在 Manifest 里也没有任何
+intent-filter，只能靠显式组件启动 —— 所以这个 PendingIntent 根本指不到它。
+
+实测现象完全吻合（2026-11-21 日志）：
+
+```
+12:49:37.873  [SdlReceiver] 已通过 PendingIntent 启动 SdlService   ← send() 成功，没抛异常
+（之后始终没有 [SyncPlay] SyncPlay 服务创建）                        ← SdlService.onCreate 没执行
+```
+
+两种解释都指向同一结论：
+
+| 可能 | 结果 |
+|---|---|
+| `send(ctx, 0, 广播Intent)` 的 fillIn 把 `sdl.router.startservice` 补了进去 | 启动的是**声明了该 action 的 `SdlRouterService`**，不是 `SdlService` |
+| fillIn 没补 action | 变成「只有包名的隐式服务 Intent」，Android 5+ 禁止，`startForegroundService` 应抛异常 |
+
+→ **这条 Must 在 5.8.0 这套实现上对 `SdlService` 是无效的**，不是我们挑着不做。
+
+**我们现在怎么做**：只走 `startForegroundService(SdlService)`，可行性依赖
+「同 uid 的 Router 前台服务让整个 uid 不算后台」这一事实
+（证据链见 `连接可靠性排查.md` §11.1：4 轮实测 Router 上线均早于 `onSdlEnabled`）。
+
+> ⚠ **两个待验证/待观察点**（诚实记账）：
+> 1. 到 2026-11-22 的实车测试为止，跑的都是 `startService` 版本；
+>    **恢复成 `startForegroundService` 之后还没上过车**。下次上车要确认日志里
+>    没有 `ForegroundServiceStartNotAllowedException`。
+> 2. 万一在别的机型/ROM 上被拦，**没有官方 PendingIntent 这条路可退** ——
+>    届时只能考虑给 `SdlService` 加 intent-filter 让它可被 action 匹配，
+>    或退回「应用侧不持有 FGS + 用户长按关通知」那套。
 
 ---
 
@@ -248,7 +277,7 @@ FULL + 数据变化 → flush() → Show(含 softButtons) → 车机画出来
 | 3 | `SyncGlanceApp.onCreate`（进程被拉起时） | `queryForConnectedService`（Application context） | `[Boot] 应用启动，补一次…探测` |
 | 4 | 库 + 车机 | SDP → RFCOMM → 连上 Router | — |
 | 5 | 库 | 回调 `onSdlEnabled` | `[SdlReceiver] ★ onSdlEnabled` |
-| 6 | `SdlReceiver` | 双路启动服务 | `已直接启动 SdlService` |
+| 6 | `SdlReceiver` | 单路启动服务（`startSelf` → `startForegroundService`） | `已直接启动 SdlService` |
 | 7 | `SdlService` | `onCreate` → 前台服务（`onStartCommand` 里 `startForeground` + 建通知） | `[SyncPlay] 服务创建` |
 | 8 | `SdlService` | `onStartCommand` → `startProxy()` | `启动时发现连接不可用…重建连接` |
 | 9 | `SdlService` | `SdlManager.build().start()` | `✓ SdlManager 已启动` |
@@ -287,8 +316,9 @@ FULL + 数据变化 → flush() → Show(含 softButtons) → 车机画出来
 > 从来没说要放在广播里。** 所以我们的修复（删掉 `BootReceiver` 的调用）
 > 就是回到官方用法。
 
-**本车特别注意**：SYNC 1.1 不会自动发现 App，必须人工在车机上点「查找移动应用」，
-或按手机上的「唤醒车机发现」重开窗口。**这是车机行为，不是 bug。**
+**本车特别注意**：SYNC 1.1 不会自动发现 App，必须人工在车机上点「查找移动应用」。
+手机端不再提供手动「唤醒窗口」按钮（`130d078` 已移除），改为 `onSdlEnabled` 里
+自动 `wakeRouter()`。**这是车机行为，不是 bug。**
 
 **软键**：下车后随会话结束消失；再上车 FULL 后重建。
 
@@ -485,10 +515,10 @@ if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) return;   //
 |---|---|---|---|
 | 1 | `queryForConnectedService` 在 **`SyncGlanceApp.onCreate`** 也调 | 应用可能因广播被拉起、界面没开，需补探测 | 🟢 多次成功 |
 | 2 | 保留 `BootReceiver`（官方没有） | 记录启动来源 + 蓝牙白名单 | 🟢 |
-| 3 | `onSdlEnabled` **双路启动**（`startSelf` + PendingIntent） | 官方二选一；踩过 `pendingIntent.send()` 返回成功但服务没起来 | 🟢 12:49 日志 |
+| 3 | `onSdlEnabled` **单路**启动（`startSelf` → `startForegroundService`） | 官方那条 Must 的 PendingIntent 指不到 `SdlService`（见注②），只能自己 start | 🟢 12:49 日志 + 反编译 |
 | 4 | `RouterAlive` 跨进程广播（`ROUTER_ALIVE/DEAD`） | 5.8 没有 `isRouterServiceRunning()` | 🟢 通知正文依赖它 |
-| 5 | `MainActivity` 的「唤醒车机发现」按钮 | 本车不自动发现 App | 🟢 |
-| 6 | `closedOnce` + `ConnectionStatus` 六种文案 | 官方只要求前台通知，未规定文案 | — 现为**死代码**，随通知移除 |
+| 5 | ~~`MainActivity` 的「唤醒车机发现」按钮~~ | 已移除（`130d078`，调试功能清理）。现在靠 `onSdlEnabled` 里自动 `wakeRouter()` | — |
+| 6 | `ConnectionStatus` 的 8 条优先级 / 16 格文案矩阵 | 官方只规定「要有前台通知」，未规定文案 | — 见 `通知移除与存活权衡.md` §12.3 |
 | 7 | `handleConnectionClosed` 里 `stopSelf()` 前先 `updateNotification()` | 让状态可见 | — |
 | 8 | 崩溃兜底 `UncaughtExceptionHandler` | 只写日志，不吞异常 | — |
 | 9 | 不 `deleteNotificationChannel`（官方示例删） | 留渠道避免反复创建 / 丢用户设置 | — |

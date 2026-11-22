@@ -1497,6 +1497,10 @@ OnButtonPress { PLAY_PAUSE, SHORT }
 **下一步**：用主界面的「字符测试」按钮逐组探测，找出车机真正有字形的字符，
 再决定 `Glyphs.ENABLED` 要不要打开、具体保留哪些。
 
+> ⚠ 2026-11-22 备注：**「字符测试」按钮和 `CharProbe` 已在 `130d078` 移除**
+> （调试功能清理）。下面的结论是当时实测得到的，仍然有效；
+> 若哪天还要复测，得先把 `CharProbe` 加回来。
+
 #### 8.18.1 关于「另一套编码」——日语字符的几种可能
 
 Unicode 把所有文字统一到一个码位空间，但**车机字库是按某套旧编码的子集做的**。
@@ -1535,7 +1539,8 @@ Unicode 把所有文字统一到一个码位空间，但**车机字库是按某�
 
 **修法（按官方链路重做，不是自己造轮子）**：
 
-1. **`SyncRouterService`** —— 继承库的 `SdlRouterService`，Manifest 里声明
+1. **`SdlRouterService`** —— 继承库的 `SdlRouterService`（类名必须与基类同名，见 §8.21），
+   Manifest 里声明
    action `com.smartdevicelink.router.service`。
    它才是负责监听 RFCOMM、注册 SDP 记录、让车机「发现本应用」的那一层。
    没有它，车机端根本不知道手机上有 SDL 应用。
@@ -1727,7 +1732,7 @@ Unicode 把所有文字统一到一个码位空间，但**车机字库是按某�
 Router 没跑 ≈ 车机蓝牙没连上，通知里就该如实说「蓝牙未连接」（不是"等待车机"）。
 
 **结论**：
-- **不主动拉起 Router**，只被动监听它上下线（靠 `SyncRouterService` 自己发应用内广播）
+- **不主动拉起 Router**，只被动监听它上下线（靠 `SdlRouterService` 自己发应用内广播）
 - **不做应用层定时重试**（4.12.2 时代写过「每 5 秒 ×12 次」，会让车机侧反复收到
   同一个 appName 的注册请求、卡在「恢复连接」）
 - SDL 5.8 没有 `isRouterServiceRunning()` 这类 API，只能自己上报

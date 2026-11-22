@@ -703,7 +703,7 @@ Connection closed                               ← 连过又断（几乎看不�
 文案规则集中在 `display/ConnectionStatus.java`（纯逻辑，可单测）。
 
 **Router 存活怎么知道的**：SDL 5.8 没有 `isRouterServiceRunning()` 这类 API，
-所以 `SyncRouterService`（我们自己的子类，跑在 `com.smartdevicelink.router` 独立进程）
+所以 `SdlRouterService`（我们自己的子类，跑在 `com.smartdevicelink.router` 独立进程）
 在 `onCreate` / `onStartCommand` / `onDestroy` 里发**应用内广播**上报，主进程被动接收。
 已知盲区：Router 进程被系统直接杀掉时 `onDestroy` 不回调，`routerAlive` 会停在
 「运行中」直到下次 Router 起来自愈（影响日志、秒失败判定和通知正文里的 Router 状态）。
@@ -720,7 +720,7 @@ Connection closed                               ← 连过又断（几乎看不�
 ```
 ① 手机与车机建立蓝牙音频连接（A2DP/HFP，跟 SDL 无关）
 ② Android 发 ACL_CONNECTED 广播
-③ SdlReceiver 收到 → 启动 SyncRouterService
+③ SdlReceiver 收到 → 启动 SdlRouterService
 ④ RouterService 注册 SDP 记录 + 监听 RFCOMM
 ⑤ 车机做 SDP 服务发现 → 发起 RFCOMM → 连上
 ⑥ RouterService 多路复用 → SdlService 建 SdlManager → RAI
@@ -744,7 +744,7 @@ Connection closed                               ← 连过又断（几乎看不�
 车机连不上就放弃 → 用户后来才打开 App」的场景。
 
 - 位置：`SyncGlanceApp.onCreate()`（Application 级，任何进程启动都会跑）
-- **必须只在主进程执行**：`SyncRouterService` 跑在独立进程，那个进程里
+- **必须只在主进程执行**：`SdlRouterService` 跑在独立进程，那个进程里
   「Router 问自己连上了吗」没有意义，还会干扰时序
 - **首次安装后的第一次启动会失败**（实测：第二次就成功）—— `Application.onCreate`
   跑得极早，蓝牙权限/库内部初始化还没就绪，异常 message 往往为空。
@@ -815,20 +815,22 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | `SdlService.onDestroy()` 里 `sdlManager.dispose()` | ✅ | 官方标了 "Must" |
 | `SdlManager` 实例不可复用，断开后必须新建 | ✅ | 用「代际号」`generation` 忽略旧对象的迟到回调 |
 | `SdlReceiver extends SdlBroadcastReceiver`，`exported="true"`，监听 `ACL_CONNECTED` + `sdl.router.startservice` | ✅ | 缺 `sdl.router.startservice` 会让 `queryForConnectedService` 直接抛异常 |
-| `defineLocalSdlRouterClass()` 返回自己的 Router 子类 | ✅ `SyncRouterService` | |
-| **`onSdlEnabled` 启动服务要分版本** | ⚠ 已偏离 | 官方要 Android 12+ 用 PendingIntent；我们**统一用 `startForegroundService`**（2026-11-22 恢复前台时改回） |
+| `defineLocalSdlRouterClass()` 返回自己的 Router 子类 | ✅ `SdlRouterService` | |
+| **`onSdlEnabled` 启动服务要分版本** | ⚠ **无法落实（库侧）** | 官方要 Android 12+ 用 Router 递来的 PendingIntent；但那个 PendingIntent 的目标 Intent **只有 `setPackage`、没有 component**，指不到 `SdlService`。我们只能用 `startForegroundService`。详见 [场景对照](sdl生命周期-场景对照.md) 注② |
 
 **两处曾漏掉、2026-11-21 补齐的**：
 
 1. `SdlService` 的 `exported` 从 `false` 改 `true` —— 应用在后台时，
    Router/系统从外部启动服务需要它可以被外部访问
-2. `onSdlEnabled` 补 PendingIntent 路径 —— 官方对 Android 12+ 的推荐做法
+2. ~~`onSdlEnabled` 补 PendingIntent 路径~~ —— **2026-11-22 已撤回**：
 
-> **2026-11-22 后续**：第 2 条（PendingIntent 双路）**没有恢复**。Router 给的是
-> `PendingIntent.getForegroundService(...)`，历史上它从未真正拉起过 `SdlService`
-> （`send()` 成功但 `onCreate` 不执行，车机最终超时）；而
-> `startForegroundService` 已实测可靠（`连接可靠性排查.md` §11.1：Router 必先存在，
-> 同 uid 有前台服务，后台启动限制结构上不会触发）。
+> Router 给的是 `PendingIntent.getForegroundService(ctx, ts, new Intent().setPackage(pkg), ...)`
+> —— 目标 Intent 里**没有 component、没有 action**，而我们的 `SdlService` 也没有
+> intent-filter，所以它根本指不到 `SdlService`。实测（2026-11-21 12:49）
+> `send()` 返回成功但 `SdlService.onCreate` 从未执行。
+> **这条官方 Must 在 5.8.0 上对我们是无效的**，不是我们挑着不做。
+> 现在只走 `startForegroundService`（依据：同 uid 的 Router 前台服务让整个 uid
+> 不算后台，见 `连接可靠性排查.md` §11.1）。
 
 > 我们额外做、官方 Integration Basics 里没有的：通知监听（`NotificationCatcher`）、
 > 高德 AmapLink 解密、`SyncPlayCore` 把数据采集与连接层解耦。这些属于业务，不影响
@@ -846,7 +848,7 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | **计时器**（正/倒/暂停/清零） | `SyncPlayCore.doTimer()` | ✅ 本地状态生效、预览正确；RPC 记 pending |
 | **导航模式**开关 | `SyncPlayCore` | ✅ 正常 |
 | 歌词加载与缓存 | `SyncPlayCore` | ✅ 正常 |
-| 发 RPC / 重置连接 / 软键测试 / 字符测试 | `SdlService` | ❌ 报「服务未启动」是正确的 |
+| 发 RPC / 重置连接 / 软键测试 | `SdlService` | ❌ 报「服务未启动」是正确的 |
 
 **踩过的坑**：计时器原本写在 `SdlService.doTimer()` 里，`MainActivity` 走
 `SdlService.getInstance()`。服务常驻时看着没问题；一改成官方语义（断开就退出），

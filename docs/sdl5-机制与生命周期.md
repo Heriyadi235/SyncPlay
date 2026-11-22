@@ -258,7 +258,7 @@ NONE ──车机选中──> BACKGROUND ──用户切到本 App──> FULL
 Manifest 三件套缺一不可（否则车机发现不了应用）：
 
 ```xml
-<service android:name=".receiver.SyncRouterService"
+<service android:name=".receiver.SdlRouterService"
     android:process="com.smartdevicelink.router"
     android:foregroundServiceType="connectedDevice"
     android:exported="true">
@@ -314,7 +314,7 @@ protected static void pingRouterService(Context, String, String);
 
 这些要么库内部维护、时机不可靠，要么只回答"有没有连上车机"。
 
-**本项目做法**（`SyncRouterService` 是普通子类，加两行就行）：
+**本项目做法**（`SdlRouterService` 是普通子类，加两行就行）：
 
 ```java
 @Override public void onCreate()     { super.onCreate();     report(true);  }
