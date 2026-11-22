@@ -212,7 +212,7 @@ public class SdlService extends Service {
      * 它只 consumeQueuedRouterService()，Router 队列空就 5~9ms 秒退
      * （根因详见 docs/连接可靠性排查.md 第十节）。
      *
-     * <h3>为什么是 2500ms / 为什么窗口从 10 秒收紧到 5 秒</h3>
+     * <h3>为什么是 2000ms × 4 次 = 8 秒窗口</h3>
      * 2026-11-22 实测（受控重试上线后）：
      *   - 4 次恢复连接里只发生 1 次秒失败，且重试 1 次（2.5 秒后）就成功
      *   - SdlManager 启动后到车机回话（OnPermissionsChange）的延迟是 2~3 秒
@@ -220,13 +220,14 @@ public class SdlService extends Service {
      *     而 5.x 把它拆成了「等 onSdlEnabled 约 4 秒」+「SdlManager 后 2~3 秒」两段，
      *     5.x 真正需要重试覆盖的只有后者
      *
-     * 结论：2.5s × 4 = 10 秒是按「6~7 秒延迟」误估的，过保守；收紧到 2.5s × 2 = 5 秒，
-     * 实测 1 次重试即成功，留一倍余量应对时序抖动。
+     * 结论（福特 SYNC 1.1 / 2012 福克斯 MFD4 车机的响应速度）：
+     * 这台车机蓝牙栈冷启动 / 车机回话偏慢，取 2s 间隔 × 4 次 = 8 秒窗口，
+     * 既比实测单次 2~3 秒留足余量，又密集采样（每 2 秒一个点），保守覆盖冷启动时序抖动。
      */
-    private static final long FAST_FAIL_RETRY_DELAY_MS = 2500;
+    private static final long FAST_FAIL_RETRY_DELAY_MS = 2000;
 
-    /** 秒失败最多重试次数（2.5s × 2 = 5 秒窗口，实测 1 次即成功，留一倍余量） */
-    private static final int FAST_FAIL_MAX_RETRY = 2;
+    /** 秒失败最多重试次数（2s × 4 = 8 秒窗口，按福特 SYNC 1.1 车机响应速度留余量） */
+    private static final int FAST_FAIL_MAX_RETRY = 4;
 
     /**
      * 这次进程起来之后，是否"连上过又断开了"。
