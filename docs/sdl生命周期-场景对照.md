@@ -117,7 +117,7 @@ sdl.router.startservice
 | 1 | Service 声明 `exported="true"` + `enabled="true"` + `foregroundServiceType="connectedDevice"` | Note（API 31） | Manifest 已声明 | ✅ |
 | 2 | `onCreate` 里 `startForeground`（Android O+） | Note | ✅ 已恢复；`startForeground` 放在 `onStartCommand` 第一行（更贴近 API 契约） | ✅ 等价 |
 | 3 | `onDestroy` 里 `stopForeground(true)`，**不要把通知留在通知栏** | Note | ✅ 已恢复：`stopForeground(STOP_FOREGROUND_REMOVE)` | ✅ 等价 |
-| 4 | 官方还 `deleteNotificationChannel` | 示例代码 | 我们**不删渠道**（渠道已不再创建） | ⚠ 已整体移除 |
+| 4 | 官方还 `deleteNotificationChannel` | 示例代码 | **不删渠道**（`createChannel()` 按需创建、幂等） | ⚠ 有意偏离，理由见注③ |
 | 5 | `onStartCommand` 里 `if (sdlManager == null)` 才建 | 示例 | `needRebuild()`：null **或** 已 DISCONNECTED 都重建 | ✅ 更严格 |
 | 6 | `return START_STICKY` | 示例 | 保留 | ✅ |
 | 7 | `SdlManagerListener.onDestroy()` 里 `stopSelf()` | 示例 | 一样 | ✅ |
@@ -211,6 +211,27 @@ intent-filter，只能靠显式组件启动 —— 所以这个 PendingIntent �
 > 2. 万一在别的机型/ROM 上被拦，**没有官方 PendingIntent 这条路可退** ——
 >    届时只能考虑给 `SdlService` 加 intent-filter 让它可被 action 匹配，
 >    或退回「应用侧不持有 FGS + 用户长按关通知」那套。
+
+### 注③：第 4 条为什么不 `deleteNotificationChannel`
+
+**官方做法**：示例在 `onDestroy` 里调 `deleteNotificationChannel(...)`，官方注释还附了
+一句限定 —— *"If this is the only notification on your channel"*。
+目的是：前台服务没了，就别在「设置 → 通知」里留一个再也用不到的僵尸类别。
+
+**我们不删，三条理由**：
+
+| 理由 | 说明 |
+|---|---|
+| **删渠道 = 抹掉用户的设置** | 渠道一旦删除，用户对它调过的重要性、提示音、震动、静音全部丢失；下次重建是**默认重要性**的新渠道。而「嫌它吵，把它调静音」恰恰是这类常驻通知最常见的用户操作 |
+| **我们是长期复用的渠道** | `SyncPlay 连接状态` 不是一次性用途 —— 每次连车机都要用。按官方那样在 `onDestroy` 里删，等于**每轮会话结束都把用户的设置重置一次** |
+| **`createChannel()` 已做成幂等且不覆盖** | 代码里先 `getNotificationChannel(CHANNEL_ID) != null` 就 `return`，只有渠道真的不存在才 `createNotificationChannel()` —— 所以「留渠道」不会带来重复创建或覆盖问题 |
+
+**代价很低**：渠道是 `IMPORTANCE_LOW`、无声、无角标，长期留着也不打扰。
+
+**什么时候会吃亏（诚实记账）**：如果哪天**彻底不再发通知**，这个渠道就会像僵尸一样
+留在系统设置里。2026-11-22 白天移除通知时就真踩到了 —— 当时专门写了
+`removeLegacyNotificationChannel()` 去清（后来恢复通知，该方法又删了）。
+只要通知在用，这个代价就不存在。
 
 ---
 
