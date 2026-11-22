@@ -105,6 +105,13 @@ public final class SyncPlayCore {
                 }
             });
 
+            /*
+             * 导航过期是渲染器内部定时器发现的（staleWatchdog），不经过
+             * setNavigation()，所以要让它反过来通知我们推一次时钟 ——
+             * 否则导航结束降级到空闲后，车机上那个 ETA 读数会一直停着。
+             */
+            renderer.setClockRefreshListener(this::pushClock);
+
             // 数据源：音乐通知 + 高德导航
             NotificationCatcher.setMusicListener(musicListener);
             AmapLinkClient.setNavListener(navListener);
@@ -252,7 +259,6 @@ public final class SyncPlayCore {
         //   否则车机上那个到达时刻只会在换歌的瞬间刷新（历史 bug）。
         pushClock();
     }
-
     public void setManualNavMode(boolean on) {
         Navigation n = renderer.getNavigation();
         if (n == null) n = new Navigation();

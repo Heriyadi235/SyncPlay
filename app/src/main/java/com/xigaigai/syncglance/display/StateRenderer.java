@@ -272,6 +272,21 @@ public class StateRenderer {
                                 + " 秒，自动降级到空闲/歌曲模式");
                         nav.clear();
                         navClockText = null;
+                        lastEtaSent = null;
+                        lastClockTextSent = null;
+                        /*
+                         * ★ 必须通知外部重推时钟。
+                         *
+                         *   这是「导航结束降级到空闲屏幕时时钟不消失」的直接原因：
+                         *   以前这里只 markDirty 重画界面，但时钟格是车机**自己维护**
+                         *   的 —— 不发新指令它就一直停在最后那个 ETA 读数上。
+                         *
+                         *   调 clockNeedsRefresh 让 SyncPlayCore 跑一次 pushClock()，
+                         *   它会因为「没导航 ETA、没有歌」而发出 CLEAR。
+                         */
+                        if (clockNeedsRefresh != null) {
+                            try { clockNeedsRefresh.run(); } catch (Exception ignored) { }
+                        }
                         // 强制重绘 —— 不能依赖下次事件
                         dirty = true;
                         schedule();
@@ -301,6 +316,20 @@ public class StateRenderer {
         // 车机连上/断开会影响「有没有人在看」，位置心跳要重新评估
         ensureTickers();
         schedule();
+    }
+
+    /**
+     * 「时钟格该重新推一遍了」的回调，由 {@code SyncPlayCore} 注入（内部会调用
+     * {@code pushClock()}）。
+     *
+     * <p>为什么需要它：时钟格是<b>车机自己维护</b>的 —— 不发新指令它就停在那儿。
+     * 而导航过期是<b>内部定时器</b>发现（{@link #staleWatchdog}），不经过
+     * {@code SyncPlayCore.setNavigation()}，所以得反过来主动通知一次。</p>
+     */
+    private Runnable clockNeedsRefresh;
+
+    public void setClockRefreshListener(Runnable r) {
+        this.clockNeedsRefresh = r;
     }
 
     public void setNavigation(Navigation n) {
@@ -1169,27 +1198,66 @@ public class StateRenderer {
             return out;
         }
 
-        // 歌曲模式：从播放位置起表（COUNTUP 本身就会真正生效，不需要再来一条 PAUSE）
+        /*
+         * 歌曲模式：从播放位置起表（COUNTUP 本身就会真正生效，不需要再来一条 PAUSE）。
+         *
+         * ★ 导航结束时如果还在放歌，就走到这里 —— 时钟从 ETA 切回播放时间，
+         *   这是期望行为（用户明确要求「时钟切回播放时间」）。
+         */
         lastClockTextSent = null;
-        if (song == null || !song.hasData() || !song.playing) return out;
 
-        String key = song.title + "|" + song.artist;
-        boolean songChanged = !key.equals(lastSongKey);
-        if (!songChanged && songClockStarted) return out;
+        // 暂停中 / 无歌：不是"起了新表"，落到下面的 CLEAN 分支判断
+        if (song != null && song.hasData() && song.playing) {
+            String key = song.title + "|" + song.artist;
+            boolean songChanged = !key.equals(lastSongKey);
+            if (songChanged || !songClockStarted) {
+                long pos = song.positionMs;
+                if (pos < 0) pos = 0;
+                int h = (int) (pos / 3_600_000);
+                int m = (int) ((pos / 60_000) % 60);
+                int s = (int) ((pos / 1000) % 60);
 
-        long pos = song.positionMs;
-        if (pos < 0) pos = 0;
-        int h = (int) (pos / 3_600_000);
-        int m = (int) ((pos / 60_000) % 60);
-        int s = (int) ((pos / 1000) % 60);
+                lastSongKey = key;
+                songClockStarted = true;
+                Log2.i(TAG, "启动播放计时 " + String.format(java.util.Locale.US,
+                        "%02d:%02d:%02d", h, m, s));
 
-        lastSongKey = key;
-        songClockStarted = true;
-        Log2.i(TAG, "启动播放计时 " + String.format(java.util.Locale.US,
-                "%02d:%02d:%02d", h, m, s));
+                out.add(SetMediaClockTimer.countUpFromStartTime(
+                        new StartTime(h, m, s), null, AudioStreamingIndicator.PLAY));
+                return out;
+            }
+            // 同一首歌已经在走表了，不用重发
+            return out;
+        }
 
-        out.add(SetMediaClockTimer.countUpFromStartTime(
-                new StartTime(h, m, s), null, AudioStreamingIndicator.PLAY));
+        /*
+         * ★⑤ 该显示空，但我们之前往那一格发过东西 → 补一条 CLEAR 收掉。
+         *
+         *   这是「导航结束降级到空闲屏幕时时钟不消失」的根因：
+         *   以前走到函数末尾就 return 空列表，一条指令都不发，
+         *   而车机不会自己清空那一格 —— 它保留最后一次读数，直到收到 CLEAR。
+         *
+         *   触发条件（三者同时满足）：
+         *     · 没有用户计时器（timerRunning / 暂停中的 timerActive 都不算走到这里的理由，
+         *       见下面那句守卫）
+         *     · 没有导航 ETA（上面分支已 return）
+         *     · 没有在播的歌（上面分支已 return）
+         *   再叠加「之前发过东西」（lastClockTextSent / songClockStarted），
+         *   避免空闲状态下反复发 CLEAR。
+         */
+        if (timerActive) {
+            // 用户计时器还占着那一格（暂停态），不能清 —— 那是用户的东西
+            return out;
+        }
+        if (lastClockTextSent != null || songClockStarted) {
+            lastClockTextSent = null;
+            songClockStarted = false;
+            lastSongKey = null;
+            lastEtaSent = null;
+            Log2.i(TAG, "时钟该为空了（无导航/无播放）→ 发 CLEAR 收掉");
+            out.add(SetMediaClockTimer.clearWithPlayPauseIndicator(
+                    AudioStreamingIndicator.PAUSE));
+        }
         return out;
     }
 
