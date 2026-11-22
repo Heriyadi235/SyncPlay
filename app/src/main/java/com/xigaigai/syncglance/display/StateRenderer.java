@@ -1002,8 +1002,16 @@ public class StateRenderer {
          *
          * ★ 同时清掉投递指纹：用户主动改了计时状态，必须重新投一次。
          *   否则「暂停 → 继续 → 在同一秒内又暂停」会被节流判成"读数没变"而漏发。
+         *
+         * ★ 清零时还要放开歌曲计时的闸门，让时钟格能重新走播放时间 ——
+         *   否则 songClockStarted 仍为 true 且歌没换，songClockRpcList() 会判定
+         *   "不用重发"，车机就停在上一条计时器读数上（实测问题）。
          */
         timerClockKey = null;
+        if ("CLEAR".equals(mode)) {
+            songClockStarted = false;
+            lastSongKey = null;
+        }
         markDirty("timerState");
     }
 
@@ -1038,6 +1046,29 @@ public class StateRenderer {
     }
 
     /**
+     * {@link #timerClockList()} 的返回值。
+     *
+     * <p>为什么不用「null / 空列表 / 非空列表」三种含义塞进一个 List：
+     * 那样分不清「计时器接管但被节流（本轮不发，但也<b>不能</b>往下走 ETA）」
+     * 和「没有计时器（可以走 ETA）」。上一版就是这么混的 ——
+     * 计时器因节流返回空列表，调用方当成"已清除"，直接掉进 ETA 分支把时间覆盖了。</p>
+     */
+    private static final class TimerClockResult {
+        /** 计时器是否接管时钟格（不管本轮发不发） */
+        final boolean occupying;
+        /** 本轮要发的指令；occupying 为 true 时可能为空（节流） */
+        final java.util.List<SetMediaClockTimer> rpcs;
+
+        TimerClockResult(boolean occupying, java.util.List<SetMediaClockTimer> rpcs) {
+            this.occupying = occupying;
+            this.rpcs = rpcs;
+        }
+
+        static final TimerClockResult NOT_OCCUPYING =
+                new TimerClockResult(false, java.util.Collections.emptyList());
+    }
+
+    /**
      * 按<b>本地记录的状态</b>重算「现在该让车机显示什么」—— 供跨失焦/重连后补发。
      *
      * <h3>为什么需要这个方法</h3>
@@ -1046,21 +1077,14 @@ public class StateRenderer {
      * 起点 {@code timerStartMillis}、暂停时刻 {@code timerPausedAt}。
      * 回到 FULL 后按这些重算一遍再投射，就能做到「跨焦点存活」。
      *
-     * <h3>返回值的三种含义</h3>
-     * <ul>
-     *   <li>{@code null} —— 没有计时器要显示，调用方继续走 ETA / 播放时间</li>
-     *   <li>空列表 —— 有计时器但刚刚到期被清掉了，调用方也继续往下走</li>
-     *   <li>非空列表 —— 计时器接管，直接发这些指令</li>
-     * </ul>
-     *
      * <h3>倒计时到期</h3>
      * 需求：倒计时在失焦期间走完 → 回来就不用管了，按「已清除」处理，
      * 时钟格切回 ETA / 播放时间（见用户 2026-11-21 的决定）。
      */
-    private java.util.List<SetMediaClockTimer> timerClockList() {
+    private TimerClockResult timerClockList() {
         if (!timerActive) {
             timerClockKey = null;
-            return null;
+            return TimerClockResult.NOT_OCCUPYING;
         }
 
         long v = timerElapsedSeconds();
@@ -1069,7 +1093,7 @@ public class StateRenderer {
         if (timerCountdown && v <= 0) {
             Log2.i(TAG, "倒计时已结束（失焦期间走完），自动清除");
             clearTimerState();
-            return new java.util.ArrayList<>(0);
+            return TimerClockResult.NOT_OCCUPYING;
         }
 
         /*
@@ -1079,10 +1103,12 @@ public class StateRenderer {
          * 必须按新读数重投一次；而没离开过的时候读数不变，就不该重复发。
          *
          * 粒度是秒 —— 所以只有在真正需要重投（跨焦点、刚启动、刚暂停）时才会命中变化。
+         *
+         * ★ 命中节流时返回 occupying=true + 空 rpcs —— **调用方绝对不能再往下走 ETA**。
          */
         String key = v + "|" + (timerRunning ? "run" : "pause");
         if (key.equals(timerClockKey)) {
-            return java.util.Collections.emptyList();   // 已投递过，本轮不用再发
+            return new TimerClockResult(true, java.util.Collections.emptyList());
         }
 
         int hh = (int) (v / 3600);
@@ -1106,7 +1132,7 @@ public class StateRenderer {
             Log2.i(TAG, "投递计时器（暂停定格）: " + hh + ":" + mm + ":" + ss);
         }
         timerClockKey = key;
-        return out;
+        return new TimerClockResult(true, out);
     }
 
     /** 上一次投递给车机的计时器状态指纹：{@code "读数|run/pause"} */
@@ -1119,6 +1145,16 @@ public class StateRenderer {
         timerStartMillis = 0;
         timerPausedAt = 0;
         timerClockKey = null;
+        /*
+         * ★ 同时放开歌曲计时的闸门。
+         *
+         *   计时器退出后，时钟格要能重新走「播放时间」。但 songClockStarted 如果还是 true
+         *   且歌没换，songClockRpcList() 会判定"同一首歌已经在走表了，不用重发"，
+         *   结果车机停在上一条计时器读数上 —— 这就是「播放歌曲时计时、清零后
+         *   没切回播放时间」的原因。
+         */
+        songClockStarted = false;
+        lastSongKey = null;
         markDirty("timerAutoClear");
     }
 
@@ -1257,15 +1293,25 @@ public class StateRenderer {
          *   现在按 timerActive 判断，并且在跑/暂停都要把当前读数重投一次
          *   （掉出 FULL 期间车机已经把它丢了，不重投就对不上）。
          */
-        java.util.List<SetMediaClockTimer> timer = timerClockList();
-        if (timer != null) {
-            if (timer.isEmpty()) {
-                // 倒计时刚到期被清掉 → 继续往下走，让 ETA / 播放时间接管
-                Log2.i(TAG, "计时器已到期清除，时钟格回落到 ETA / 播放时间");
-            } else {
-                return timer;
-            }
+        TimerClockResult timer = timerClockList();
+        if (timer.occupying) {
+            /*
+             * 计时器接管时钟格。
+             *
+             * ★ 这里必须**无条件 return**，哪怕 rpcs 为空（节流命中也算）。
+             *   上一版是 `if (timer.isEmpty()) 继续往下走`，把"节流未发"
+             *   和"计时器已清除"混为一谈 —— 于是计时器运行时只要有一次节流命中，
+             *   就掉进下面的 ETA 分支，到达时刻把计时器覆盖掉。
+             *
+             * ★ ETA 不需要另外缓存：navClockText 由 buildFrame() 每帧从
+             *   nav.etaClockNow() 独立算出，不受这里影响。计时器一退出，
+             *   下一次 pushClock() 自然能拿到最新的 ETA 上屏
+             *   （lastEtaSent 也不会在计时器期间被误更新，因为它只在真要发时才记）。
+             */
+            return timer.rpcs;
         }
+
+        Log2.i(TAG, "计时器已结束，时钟格交回 ETA / 播放时间");
 
         // 导航模式优先显示 ETA
         if (navClockText != null && !navClockText.isEmpty()) {
