@@ -2,6 +2,8 @@ package com.xigaigai.syncglance.util;
 
 import android.content.Context;
 import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.text.SimpleDateFormat;
@@ -72,6 +74,29 @@ public final class Log2 {
     private static java.io.File logFile;
     private static long lastFlushAt = 0;
 
+    /*
+     * ★ 定时刷盘（2026-11-22 加）。
+     *
+     *   原来的惰性实现有个致命坑：只有「下一条日志到来」时才检查时间差，
+     *   进程一旦安静下来，缓冲里最后几条就一直不落盘。连接类问题最关键的证据
+     *   恰恰是「进程死前最后几条」，于是要么丢、要么像 Router 进程那样整个缓冲都没了。
+     *   这里加一个每 5 秒跑一次的定时器，主动 flushNow()。
+     *
+     *   多进程安全：static 是进程内的，Router 进程和主进程各自一个 Handler、
+     *   各自 flush，写的是同一个文件（追加 + synchronized 保护）。
+     */
+    private static Handler flushHandler;
+
+    private static final Runnable flushRunnable = new Runnable() {
+        @Override
+        public void run() {
+            flushNow();
+            if (flushHandler != null) {
+                flushHandler.postDelayed(this, FLUSH_INTERVAL_MS);
+            }
+        }
+    };
+
     private Log2() { }
 
     /** 在 Application 或首个 Service 里初始化一次 */
@@ -84,6 +109,18 @@ public final class Log2 {
                 if (dir == null) dir = appContext.getFilesDir();
                 if (dir != null) logFile = new java.io.File(dir, "syncplay.log");
             } catch (Exception ignored) { }
+        }
+        startFlushTimer();
+    }
+
+    /** 启动定时刷盘（每 FLUSH_INTERVAL_MS 一次，幂等） */
+    private static void startFlushTimer() {
+        if (flushHandler != null) return;
+        try {
+            flushHandler = new Handler(Looper.getMainLooper());
+            flushHandler.postDelayed(flushRunnable, FLUSH_INTERVAL_MS);
+        } catch (Exception ignored) {
+            flushHandler = null;
         }
     }
 

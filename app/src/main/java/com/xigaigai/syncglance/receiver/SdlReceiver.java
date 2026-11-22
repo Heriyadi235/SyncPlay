@@ -90,6 +90,20 @@ public class SdlReceiver extends SdlBroadcastReceiver {
         Log2.i(TAG, "★ onSdlEnabled —— 车机已连通 RouterService，启动 SdlService");
 
         /*
+         * ★ 先确保 Router 在前台窗口（2026-11-22 加，配合受控重试）。
+         *
+         *   实车发现：onSdlEnabled 触发 ≠ Router 已经 ready ——
+         *   它只是收到 sdl.router.startservice 广播，而广播到达时 Router 的
+         *   SDP/RFCOMM 可能还没就绪。5.x 的 TransportManager 绑不上就同步 onDestroy，
+         *   于是出现「onSdlEnabled → 服务创建 → 5ms 秒退」。
+         *
+         *   这里先 wakeRouter() 让 Router 重新进前台、重新挂监听，
+         *   给 SdlManager 一个更高概率能绑上的状态。这是辅助手段，
+         *   真正的兜底在 SdlService 的受控重试（秒失败时延迟重建）。
+         */
+        wakeRouter(context);
+
+        /*
          * ★ 官方 Must（Android 14 / API 34 及以上）：先检查有没有
          *   connectedDevice 类型的前台服务权限，没有就**直接放弃启动**。
          *

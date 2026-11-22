@@ -193,6 +193,23 @@ public class SdlService extends Service {
      */
     private long proxyStartedAt = 0;
 
+    /** 本次连接是否收到过任何 OnHMIStatus（用于判断"秒失败时是否真的没对上话"） */
+    private volatile boolean everGotHmiStatus = false;
+
+    /** 秒失败重试计数（只在「建连 <500ms 且零 HMI 报文」时递增） */
+    private int fastFailRetryCount = 0;
+
+    private final Handler retryHandler = new Handler(Looper.getMainLooper());
+
+    /** 秒失败判定阈值：建连后这么短时间内就断，视为「传输根本没建立」 */
+    private static final long FAST_FAIL_MS = 500;
+
+    /** 秒失败重试延迟 */
+    private static final long FAST_FAIL_RETRY_DELAY_MS = 1500;
+
+    /** 秒失败最多重试次数 */
+    private static final int FAST_FAIL_MAX_RETRY = 2;
+
     /**
      * 这次进程起来之后，是否"连上过又断开了"。
      *
@@ -1066,6 +1083,9 @@ public class SdlService extends Service {
      */
     public void onHmiStatus(OnHMIStatus n) {
         Log2.rawMsg("←", n);
+        // 收到任何 HMI 报文 = 传输层真的通了；重置秒失败计数（连接不是"秒失败"）
+        everGotHmiStatus = true;
+        fastFailRetryCount = 0;
         SyncLifecycle.State prev = lifecycle.onHmiStatus(
                 n.getHmiLevel(), n.getFirstRun(),
                 n.getSystemContext(), n.getAudioStreamingState());
@@ -1398,6 +1418,36 @@ public class SdlService extends Service {
                 ? -1
                 : android.os.SystemClock.elapsedRealtime() - proxyStartedAt;
         proxyStartedAt = 0;
+
+        /*
+         * ★ 受控重试（2026-11-22）：只在「秒失败 + 零 HMI 报文 + 未超限」时，
+         *   不 stopSelf，延迟重建。这是对 5.x 与 4.x 本质差异的补救 ——
+         *   4.x 的 TransportBroker 会自己等/重试 Router，5.x 的 TransportManager
+         *   绑不上就同步 onDestroy。
+         *
+         *   与 §1.1 禁止的「每 5 秒重建 ×12 次」有本质区别：
+         *     - 4.x 时代重试时 RAI 已发出，车机侧反复收到注册请求 → 卡「恢复连接」
+         *     - 这里 sinceStart < 500ms 且从未收到 OnHMIStatus，说明传输根本没建立、
+         *       RAI 没发出去，车机侧零感知，重试是安全的
+         */
+        if (sinceStart > 0 && sinceStart < FAST_FAIL_MS
+                && !everGotHmiStatus
+                && fastFailRetryCount < FAST_FAIL_MAX_RETRY) {
+            fastFailRetryCount++;
+            Log2.w(TAG, "秒失败（建连至今 " + sinceStart + "ms、零 HMI 报文、RouterAlive="
+                    + routerAlive + "），延迟 " + FAST_FAIL_RETRY_DELAY_MS
+                    + "ms 重试（第 " + fastFailRetryCount + "/" + FAST_FAIL_MAX_RETRY + " 次）");
+            // 收掉这次失败占的资源，但**不 stopSelf**
+            sdlManager = null;
+            lifecycle.onProxyClosed();
+            com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(false);
+            renderer.onDisconnected();
+            com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
+            updateNotification();
+            retryHandler.postDelayed(this::startProxy, FAST_FAIL_RETRY_DELAY_MS);
+            return;
+        }
+
         Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），按官方语义停掉 Service"
                 + " ［建连至今 " + sinceStart + "ms，RouterAlive=" + routerAlive
                 + "，代际=" + generation + "］");
