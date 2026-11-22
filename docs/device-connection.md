@@ -121,7 +121,7 @@ $apk = "<工程目录>\app\build\outputs\apk\debug\app-debug.apk"
 
 | 包名 | 说明 |
 |---|---|
-| `com.xigaigai.syncglance` | **SyncPlay**（主力开发对象）← `sdl_android:4.12.2` + Multiplex 传输 |
+| `com.xigaigai.syncglance` | **SyncPlay**（主力开发对象）← `sdl_android:5.8.0` + Multiplex 传输 |
 | `<前身工程包名>` | AppLinkPro（旧，已停用） |
 | `<更旧工程包名>` | AppLinkTester（更旧，2013 老 jar） |
 
@@ -154,7 +154,7 @@ Get-Content <工作目录>\artifacts\build.log | Select-String 'BUILD|error:'
 ```kotlin
 applicationId = "com.xigaigai.syncglance"
 compileSdk 37 / minSdk 24 / **targetSdk 35**     // 仅 4.12.2 需锁 32；SDL 5.8.0 起为 35
-implementation("com.smartdevicelink:sdl_android:4.12.2")
+implementation("com.smartdevicelink:sdl_android:5.8.0")   // legacy/sdl4 分支才是 4.12.2
 android.enableJetifier=true                       // gradle.properties 里
 主题用 @style/Theme.AppCompat.Light.DarkActionBar // 不能是系统主题
 ```

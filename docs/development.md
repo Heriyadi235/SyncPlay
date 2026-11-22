@@ -1115,7 +1115,7 @@ app/src/main/java/com/xigaigai/syncglance/
 │   ├── MainActivity.java          主界面（四分组按钮）
 │   └── LogActivity.java           信息页（日志 + 车机预览）
 ├── service/
-│   ├── SdlService.java            前台服务，连接管理
+│   ├── SdlService.java            连接管理（2026-11-22 起为普通服务，无通知）
 │   ├── NotificationCatcher.java   通知监听 + 媒体信息
 │   ├── CommandRouter.java         菜单/按键路由
 │   └── KeyMap.java                按键映射配置
@@ -1671,7 +1671,12 @@ Unicode 把所有文字统一到一个码位空间，但**车机字库是按某�
 
 ### 8.26 RouterService 不启动是正常的，不要为了状态显示去拉起它
 
-**背景**：通知栏要显示 `未连接（Router 服务运行中）`，需要知道 Router 活不活。
+**背景**：曾经要在通知栏显示 `未连接（Router 服务运行中）`，需要知道 Router 活不活。
+
+> 2026-11-22 通知已移除。`routerAlive` 仍保留，用途变成两处：
+> 日志里标注秒失败时的 Router 状态、以及**秒失败判定**（`RouterAlive=false`
+> 基本等于「Router 还没就绪」，是延迟重试的直接依据）。见
+> `docs/连接可靠性排查.md` §11.3。
 
 **踩过的误区**：以为 Router 会一直常驻、或者需要主动拉起它。
 实测（手动 `am startservice` 后观察）：
@@ -1980,7 +1985,9 @@ $adb = "C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 - [ ] 车机应用列表里显示 **西改改的Sync**
 - [ ] 标题栏显示 **SyncPlay**（不截断）
 - [ ] 车机选中 App 后，手机端状态变成 `已连接(FULL)`
-- [ ] 手机通知栏显示实时连接状态（「未连接 · 等待车机」→「显示中 · 歌名」）
+- [ ] ~~手机通知栏显示实时连接状态（「未连接 · 等待车机」→「显示中 · 歌名」）~~
+      ⛔ 2026-11-22 起本应用不再有通知，此条作废；改为检查 `dumpsys activity services` 里
+      `SdlService` 的 `isForeground=false` 且 Router 仍为 `true`
 - [ ] 日志第一行能看到 `【启动来源】`，确认是被什么拉起的
 
 ### 14.2 断连重连（重点）

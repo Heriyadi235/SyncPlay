@@ -387,7 +387,7 @@ protected static void pingRouterService(Context, String, String);
 | 断开 | `onDestroy` → 清 sender、`AmapLinkClient.setHeadUnitConnected(false)`、重置"已初始化"标记 → **`stopSelf()`（官方语义）** |
 | 重连 | 库：`ACL_CONNECTED` → `SdlBroadcastReceiver.onReceive` → 唤醒 Router；车机连上 → `onSdlEnabled` → 才启动 `SdlService`。**应用层不要自己从系统广播启服务**（2026-11-21 实车证实必败，见 [连接可靠性排查.md](连接可靠性排查.md)） |
 | 重试 | **没有**应用层定时重试（踩过坑，见 §3.5） |
-| 通知 | 前台服务通知，寿命 = 服务寿命；正文只报状态枚举，不拼歌名 |
+| 通知 | **无**（2026-11-22 起整条移除，`SdlService` 不再是前台服务）。见 [通知移除与存活权衡.md](通知移除与存活权衡.md) |
 | 数据与连接解耦 | 采集/渲染在应用级单例 `SyncPlayCore`，连接层退出后预览仍可工作 |
 
 ---

@@ -60,7 +60,9 @@
 **优先级**：高（Ford 强制项）
 
 **做什么**
-- 前台服务起 `fullScreenIntent` 锁屏 Activity
+- ~~前台服务起 `fullScreenIntent` 锁屏 Activity~~
+  → 2026-11-22 起本应用没有前台服务了；若要做，得改用普通 Activity +
+  `SYSTEM_ALERT_WINDOW`/锁屏专用方案，或重新引入一个「只为锁屏」的独立前台服务
 - 显示 `SYNC AppLink` 文案 + 退出按钮
 - HMI FULL 时显示，BACKGROUND / NONE 时关闭
 
