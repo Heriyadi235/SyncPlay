@@ -268,41 +268,48 @@ OnLockScreenStatus { showLockScreen: REQUIRED, driverDistraction: true, hmiLevel
 
 ## 五、上车测试待确认项
 
-### 5.1 本轮（2026-11-22 晚）改动专项 —— 优先看这几条
+### 5.1 本轮（2026-11-22 晚）改动专项 —— 实车结果（23:36~23:45，3 轮连接）
 
 > 本轮改了：PendingIntent 双路启动、通知恢复 + 新文案/图标、BootReceiver 日志措辞。
 
-**T1 · PendingIntent 路径是否真的生效（最重要）**
-- [ ] 日志出现 `已通过 PendingIntent 启动 SdlService（官方 Android 12+ 路径）`
-- [ ] 紧随其后有 `已直接启动 SdlService（startForegroundService）`（兜底也走一遍，正常）
-- [ ] **不应**出现 `Unable to start service ... : not found`
-- [ ] **不应**出现 `ForegroundServiceStartNotAllowedException` / `★ 启动 SdlService 失败`
-- [ ] 之后正常 `★ 进入 FULL`
+**T1 · PendingIntent 路径 —— 🟡 无报错，但无法"证死"是哪条路拉起的**
+- [x] 三轮都出现 `已通过 PendingIntent 启动 SdlService（官方 Android 12+ 路径）`
+- [x] 紧随其后有 `已直接启动 SdlService（startForegroundService）`（兜底，正常）
+- [x] **没有** `Unable to start service ... : not found`
+- [x] **没有** `ForegroundServiceStartNotAllowedException` / `★ 启动 SdlService 失败`
+- [x] 三轮都 `★ 进入 FULL`
+- [ ] ⚠ **仍无法确认"是哪条路真正拉起了服务"** —— 双路都在 5ms 内触发，
+      日志里 `服务创建` 出现在 `startSelf` 之后 4~6ms，分不清。
+      **要严格证明**：临时注释掉 `startSelf()` 再跑一轮；
+      或给 `startSelf` 的 Intent 加一个 `start_from_self=true` extra，
+      在 `onStartCommand` 里打出来 —— 若收到一次**不带**该 extra 的启动，就证明
+      PendingIntent 那条真的到了。
 
-**T2 · 通知外观**
-- [ ] 标题是「西改改的Sync」，左侧小图标是 SDL 六边形线框，**右侧没有大图标**
-- [ ] 落在「静音」分组，不响铃、不弹横幅
-- [ ] 与库那条通知（`SDL: com.xigaigai.syncglance` + 绿色大图标）同时存在时不打架
+**T2 · 通知外观 —— ✅ 用户确认「通知没有问题」**
 
-**T3 · 通知文案是否随状态走**
-- [ ] `Waiting for connection (Router listening)` 或 `(Bluetooth not connected)`
-- [ ] 连接中 → `Connecting through SDL (Registering)` → `(Waiting for head unit)`
-- [ ] 连上后 → `Connected through SDL (FULL: IDLE / PLY / NAV / PLY/NAV)`
-- [ ] 车机切到后台/受限时 → `(BACKGROUND: …)` / `(LIMITED: …)`
-- [ ] 断开后通知消失（`Connection closed` 只会闪一下，属正常）
+**T3 · 文案随状态 —— ✅**（用户确认；日志里状态流转正常，全程无异常）
 
-**T4 · 秒失败重试的可见性**
-- [ ] 若出现 `⚠ 秒失败`，通知应短暂显示 `Connecting through SDL (Retrying 1/4)`
-- [ ] 重试后能正常连上，且计数不超过 1~2
+**T4 · 秒失败与重试 —— ✅ 2 次，均第 1 次重试即成功**
+- `23:38:58.441` 建连 5ms、`RouterAlive=false` → 2s 后重试 → 车机回话 +2.40s
+- `23:43:26.092` 建连 1ms、`RouterAlive=false` → 2s 后重试 → 车机回话 +2.06s
 
-**T5 · 新日志措辞（冷/热启动判定）**
-- [ ] 进程是被广播拉起时 → `[Boot] 【进程被拉起】蓝牙 ACL_CONNECTED ← SYNC`
-- [ ] 进程本来就在跑时 → `[Boot] 【进程已运行】收到 蓝牙 ACL_CONNECTED ← SYNC`
-- [ ] 若「明明是被拉起却显示已运行」→ 1500ms 阈值需要调大
+**T5 · 日志措辞 —— 🟡 判定正确，但没覆盖冷启动**
+- 三次都是 `【进程已运行】收到 蓝牙 ACL_CONNECTED`，且**判定是对的** ——
+  该进程自 21 点多起就没死过（这段日志里完全没有 `应用启动`）
+- [ ] **`【进程被拉起】` 这个分支还没被触发过**，要等进程真被系统杀掉再上车才能验
 
-**T6 · 回归**
-- [ ] 四状态显示、歌词滚动、导航、计时器、软键/按键都正常
-- [ ] 断开重连连续 3 轮都稳（含「关掉 App 再上车」这种冷启动场景）
+**T6 · 回归 —— ✅**
+- 三轮全部进入 FULL，会话时长 92s / 230s / 18s
+- 中间的正常事件：`失去焦点（LIMITED）` 后重新 FULL、`导航数据已过期 8 秒` 降级
+- **无任何异常 / 崩溃**
+
+**本轮耗时数据**（与前几轮一致，没有退化）
+
+| 指标 | 第 1 轮 | 第 2 轮 | 第 3 轮 |
+|---|---|---|---|
+| onSdlEnabled → 服务创建 | 22ms | 17ms | 19ms |
+| SdlManager 启动 → 车机回话 | 2.00s | 2.40s（重试后） | 2.06s（重试后） |
+| 车机回话 → 进入 FULL | 24.1s（人工选应用） | 1.25s | 1.34s |
 
 ### 5.2 早前遗留项（有空再看）
 
