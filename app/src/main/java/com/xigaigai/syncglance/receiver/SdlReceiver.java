@@ -1,13 +1,11 @@
 package com.xigaigai.syncglance.receiver;
 
-import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 
 import com.smartdevicelink.transport.SdlBroadcastReceiver;
 import com.smartdevicelink.transport.TransportConstants;
-import com.smartdevicelink.util.AndroidTools;
 import com.xigaigai.syncglance.service.SdlService;
 import com.xigaigai.syncglance.util.Log2;
 
@@ -62,7 +60,7 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     /**
      * 车机已经连上 RouterService，把 SDL 服务拉起来建 proxy。
      *
-     * <h3>为什么两条路都要走（不再二选一）</h3>
+     * <h3>为什么只走自己 start 这一条（历史教训）</h3>
      *
      * 官方 Integration Basics 给的写法是「有 PendingIntent 就发它，否则自己 start」。
      * 我们照抄后出过事（2026-11-21 实车日志）：
@@ -80,9 +78,13 @@ public class SdlReceiver extends SdlBroadcastReceiver {
      * <b>不是我们的 SdlService</b>（onCreate 压根没执行），而代码又提前 return 了，
      * 把可靠的那条路跳过 —— 车机连上 Router 后没人完成 RAI，最后超时。
      *
-     * <p>所以现在改成<b>两条都走</b>：自己 start 保证能起来，PendingIntent 作为
-     * 官方推荐的补充路径（用于系统对后台启动前台服务有限制的场景）。
-     * Service 重复启动是幂等的：{@code onStartCommand} 里 needRebuild() 会判断
+     * <p>此后一度改成「两条都走」。2026-11-22 移除前台通知时把
+     * {@code PendingIntent} 那条删掉了：Router 给的是一个
+     * {@code PendingIntent.getForegroundService(...)}，用它启动会落回
+     * 「5 秒内必须 startForeground」的契约，与「不再持有通知」直接冲突，
+     * 而且它历史上就没真正拉起过 SdlService。剩下的这条是实测可靠的那条。</p>
+     *
+     * <p>Service 重复启动是幂等的：{@code onStartCommand} 里 needRebuild() 会判断
      * 「已连接就复用」，不会重复建 SdlManager。</p>
      */
     @Override
@@ -104,43 +106,41 @@ public class SdlReceiver extends SdlBroadcastReceiver {
         wakeRouter(context);
 
         /*
-         * ★ 官方 Must（Android 14 / API 34 及以上）：先检查有没有
-         *   connectedDevice 类型的前台服务权限，没有就**直接放弃启动**。
-         *
-         *   官方示例：
-         *     if (!AndroidTools.hasForegroundServiceTypePermission(context)) {
-         *         DebugTool.logInfo(TAG, "Permission missing for ForegroundServiceType ...");
-         *         return;
-         *     }
-         *
-         *   为什么要这条：API 34 起，启动带 connectedDevice 类型的 FGS 必须有
-         *   「已连接的设备」或对应权限，否则 startForegroundService 会抛
-         *   ForegroundServiceStartNotAllowedException。以前我们没检查，
-         *   异常被 try/catch 吞掉，服务起不来，车机侧表现为「正在连接」直到超时。
-         *
-         *   本机是 Android 15（API 35），早就在这条规则的适用范围内。
+         * ★ 2026-11-22：原本这里有一段 Android 14+ 的前台服务类型权限检查
+         *   （AndroidTools.hasForegroundServiceTypePermission），因为当时是用
+         *   startForegroundService 拉起 SdlService。现在 SdlService 已不是前台服务
+         *   （通知已移除，见 docs/通知移除与存活权衡.md），这条检查随之删除。
          */
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            try {
-                if (!AndroidTools.hasForegroundServiceTypePermission(context)) {
-                    Log2.w(TAG, "缺少 connectedDevice 前台服务权限，按官方要求放弃启动 SdlService");
-                    return;
-                }
-            } catch (Throwable t) {
-                // 检查本身出问题不能挡住启动，记一笔继续
-                Log2.w(TAG, "检查前台服务类型权限时异常: "
-                        + t.getClass().getSimpleName() + " " + t.getMessage());
-            }
-        }
 
-        // ① 可靠路径：自己拉起来
         startSelf(context, intent);
-
-        // ② 官方 Android 12+ 路径：再发一次 Router 递过来的 PendingIntent（尽力而为）
-        startViaPendingIntent(context, intent);
     }
 
-    /** 自己 startForegroundService / startService */
+    /**
+     * 拉起 SdlService。
+     *
+     * <h3>★ 2026-11-22 起改用 {@code startService}</h3>
+     *
+     * 原来这里是 {@code startForegroundService}：那个 API 的契约是
+     * <b>5 秒内必须调用 {@code startForeground()}，否则抛
+     * {@code Context.startForegroundService() did not then call Service.startForeground()}</b>
+     * —— 直接崩服务。
+     *
+     * <p>现在 SdlService 不再持有通知（见 {@code docs/通知移除与存活权衡.md}），
+     * 所以必须换成 {@code startService}，否则一唤醒就崩。</p>
+     *
+     * <h3>为什么后台启动不会被拦</h3>
+     * Android 8+ 限制的是「后台应用启动服务」，而这条路径满足两点：
+     * <ul>
+     *   <li>本广播来自<b>同 uid 的 Router 进程</b>，而它正跑着前台服务
+     *       （{@code com.smartdevicelink.router}）—— 整个 uid 处于
+     *       foreground-service 状态，不受后台启动限制；</li>
+     *   <li>即便进程是从零被拉起，receiver 执行期间 App 在临时白名单里。</li>
+     * </ul>
+     *
+     * <p>万一某些 ROM 仍然拦了，会抛 {@code IllegalStateException}。这里
+     * <b>不静默吞掉</b>：打 ERROR 级日志 + 完整堆栈，方便在 LogActivity 里
+     * 一眼看出「是不是该回退到前台通知方案了」。</p>
+     */
     private void startSelf(Context context, Intent intent) {
         try {
             Intent i = new Intent(context, SdlService.class);
@@ -149,14 +149,12 @@ public class SdlReceiver extends SdlBroadcastReceiver {
                 i.putExtras(intent);
                 i.setAction(intent.getAction());
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(i);
-            } else {
-                context.startService(i);
-            }
-            Log2.i(TAG, "已直接启动 SdlService（startForegroundService）");
+            context.startService(i);
+            Log2.i(TAG, "已直接启动 SdlService（startService，非前台）");
         } catch (Exception e) {
-            Log2.e(TAG, "onSdlEnabled 直接启动 SdlService 失败", e);
+            Log2.e(TAG, "★ 启动 SdlService 失败（若为 IllegalStateException，"
+                    + "说明系统拦了后台服务启动，需回退前台通知方案，"
+                    + "见 docs/通知移除与存活权衡.md）", e);
         }
     }
 
@@ -206,35 +204,6 @@ public class SdlReceiver extends SdlBroadcastReceiver {
         } catch (Exception e) {
             Log2.w(TAG, "唤醒 RouterService 失败: "
                     + e.getClass().getSimpleName() + " " + e.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * 尝试走官方 Android 12+ 的 PendingIntent 启动方式。
-     *
-     * @return true = 已经通过 PendingIntent 启动，调用方不要再自己 start
-     */
-    private boolean startViaPendingIntent(Context context, Intent intent) {
-        if (intent == null) return false;
-        Object extra;
-        try {
-            extra = intent.getParcelableExtra(TransportConstants.PENDING_INTENT_EXTRA);
-        } catch (Exception e) {
-            return false;
-        }
-        if (!(extra instanceof PendingIntent)) return false;
-
-        try {
-            ((PendingIntent) extra).send(context, 0, intent);
-            Log2.i(TAG, "已通过 PendingIntent 启动 SdlService（Android 12+ 官方推荐方式）");
-            return true;
-        } catch (PendingIntent.CanceledException e) {
-            Log2.w(TAG, "PendingIntent 已失效，退回 startForegroundService");
-            return false;
-        } catch (Exception e) {
-            Log2.w(TAG, "PendingIntent.send 失败（" + e.getClass().getSimpleName()
-                    + "），退回 startForegroundService");
             return false;
         }
     }

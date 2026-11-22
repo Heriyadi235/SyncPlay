@@ -100,10 +100,11 @@ sdl.router.startservice
 
 | # | 官方要求 | 级别 | 我们的实现 | 判定 |
 |---|---|---|---|---|
-| 1 | Service 声明 `exported="true"` + `enabled="true"` + `foregroundServiceType="connectedDevice"` | Note（API 31） | 已补齐 | ✅ |
-| 2 | `onCreate` 里 `startForeground`（Android O+） | Note | `startAsForeground()` | ✅ |
-| 3 | `onDestroy` 里 `stopForeground(true)`，**不要把通知留在通知栏** | Note | `stopForeground(STOP_FOREGROUND_REMOVE)` | ✅ 等价 |
-| 4 | 官方还 `deleteNotificationChannel` | 示例代码 | 我们**不删渠道** | ⚠ 无害（留渠道反而避免反复创建） |
+| 0 | **（前提）`SdlService` 是前台服务** | 官方示例前提 | ⛔ **2026-11-22 起已不是**：通知整条移除，改用 `startService` 拉起 | 有意偏离，见 `docs/通知移除与存活权衡.md` |
+| 1 | Service 声明 `exported="true"` + `enabled="true"` + `foregroundServiceType="connectedDevice"` | Note（API 31） | Manifest 保留声明（服务本身不再进前台，声明无害） | ✅ 保留 |
+| 2 | `onCreate` 里 `startForeground`（Android O+） | Note | ~~`startAsForeground()`~~ **已删除** | ⛔ 不适用（见第 0 行） |
+| 3 | `onDestroy` 里 `stopForeground(true)`，**不要把通知留在通知栏** | Note | ~~`stopForeground(STOP_FOREGROUND_REMOVE)`~~ **已删除** | ⛔ 不适用（见第 0 行） |
+| 4 | 官方还 `deleteNotificationChannel` | 示例代码 | 我们**不删渠道**（渠道已不再创建） | ⚠ 已整体移除 |
 | 5 | `onStartCommand` 里 `if (sdlManager == null)` 才建 | 示例 | `needRebuild()`：null **或** 已 DISCONNECTED 都重建 | ✅ 更严格 |
 | 6 | `return START_STICKY` | 示例 | 保留 | ✅ |
 | 7 | `SdlManagerListener.onDestroy()` 里 `stopSelf()` | 示例 | 一样 | ✅ |

@@ -1,8 +1,5 @@
 package com.xigaigai.syncglance.service;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -57,8 +54,6 @@ public class SdlService extends Service {
      *   改成 SyncPlay 之后语义唯一。
      */
     private static final String TAG = "SyncPlay";
-    private static final String CHANNEL_ID = "syncglance";
-    private static final int NOTIF_ID = 1;
 
     /**
      * 车机上显示的应用名 —— 也是车机策略表里认应用的<b>唯一标识</b>。
@@ -136,8 +131,8 @@ public class SdlService extends Service {
     /**
      * 当前歌曲的显示文字，没有就返回 null。
      *
-     * ★ 只给日志/调试用 —— **不要往通知里塞**。通知只报状态枚举，
-     *   否则切歌、歌词变化都会刷通知栏（见 {@code notificationText()}）。
+     * ★ 只给日志/调试用 —— 历史上曾用来拼通知副标题，那条通知
+     *   已于 2026-11-22 移除（见 docs/通知移除与存活权衡.md）。
      */
     public String nowPlayingText() {
         if (renderer == null) return null;
@@ -169,11 +164,9 @@ public class SdlService extends Service {
         com.xigaigai.syncglance.core.SyncPlayCore core =
                 com.xigaigai.syncglance.core.SyncPlayCore.get();
         core.init(this);
-        core.setOnDataChanged(this::updateNotification);
         renderer = core.renderer();
         lifecycle = core.lifecycle();
 
-        createChannel();
         registerRouterWatcher();
 
         Log2.i(TAG, "SyncPlay 服务创建（连接层）");
@@ -234,6 +227,10 @@ public class SdlService extends Service {
      *
      * 用途：区分 {@code 未连接（连接关闭）} 和 {@code 未连接（等待车机）}——
      * 前者说明车机本来是通的、刚掉线（多半熄火/蓝牙断）；后者说明压根没连上过。
+     *
+     * ★ 2026-11-22 起本字段**暂时只写不读**：唯一的读者是通知正文
+     *   （{@code ConnectionStatus.text(...)}），而通知已移除。
+     *   刻意保留，恢复通知时可直接接回去（见 docs/通知移除与存活权衡.md）。
      */
     private volatile boolean closedOnce = false;
 
@@ -258,8 +255,7 @@ public class SdlService extends Service {
                 boolean alive = SdlRouterService.ACTION_ROUTER_ALIVE.equals(action);
                 if (alive == routerAlive) return;
                 routerAlive = alive;
-                Log2.i(TAG, "RouterService " + (alive ? "已启动" : "已退出") + "，刷新通知");
-                updateNotification();
+                Log2.i(TAG, "RouterService " + (alive ? "已启动" : "已退出"));
             }
         };
         android.content.IntentFilter f = new android.content.IntentFilter();
@@ -325,8 +321,6 @@ public class SdlService extends Service {
      */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startAsForeground();
-
         boolean forceReset = intent != null
                 && intent.getBooleanExtra(EXTRA_FORCE_RESET, false);
 
@@ -388,20 +382,11 @@ public class SdlService extends Service {
         instance = null;
 
         /*
-         * ★ 官方 Integration Basics - Java「Exiting the Foreground」：
-         *
-         *   "It's important that you don't leave your notification in the notification
-         *    tray as it is very confusing to users. So in the onDestroy method in your
-         *    service, simply call the stopForeground method."
-         *
-         *   这里只撤掉前台状态并移除通知，**不删通知渠道** ——
-         *   渠道是用户可见的设置项（可能被用户调过重要性），删了下次要重建，
-         *   而且用户的选择会丢。官方示例里 `deleteNotificationChannel` 那段
-         *   也标了 "If this is the only notification on your channel"。
+         * ★ 2026-11-22：原本这里有一段 stopForeground(STOP_FOREGROUND_REMOVE)
+         *   （官方 Integration Basics 的「Exiting the Foreground」要求）。
+         *   本服务已不再进前台、也不持有通知，故整段移除。
+         *   恢复方法见 docs/通知移除与存活权衡.md。
          */
-        try {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } catch (Exception ignored) { }
 
         // 服务退出前把日志缓冲刷到文件。
         // 连接类问题最关键的证据往往就是"最后几秒"，攒批写可能会漏掉它们。
@@ -413,105 +398,21 @@ public class SdlService extends Service {
     @Override
     public IBinder onBind(Intent intent) { return null; }
 
-    // ---------------- 前台服务 ----------------
-
-    private void createChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID, "SyncPlay 连接状态", NotificationManager.IMPORTANCE_LOW);
-            ch.setShowBadge(false);
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.createNotificationChannel(ch);
-        }
-    }
-
-    /**
-     * 启动前台服务时的初始通知。
+    /*
+     * ★ 2026-11-22：整块「前台服务 + 常驻状态通知」已移除。
      *
-     * 之后由 {@link #updateNotification()} 按连接状态持续刷新 ——
-     * 常驻通知本来就是一种"保活"手段，白白定着「等待车机连接…」很浪费。
+     *   本服务现在**不是前台服务**，不再持有任何通知。理由与代价、以及
+     *   完整的恢复步骤见 docs/通知移除与存活权衡.md。
+     *
+     *   一句话：通知栏那条 SDL 通知（RouterService 的）已经够用了，我们这条
+     *   在「等待车机」时是重复信息。代价是本进程失去前台保护，后台存活
+     *   要依赖 Router 进程的唤醒链路 + 系统电池策略（见文档）。
+     *
+     *   ⚠ 改回前台时必须同时改三处，缺一处会崩 or 不生效：
+     *     ① 这里恢复 startForeground / 通知构造；
+     *     ② onStartCommand 里恢复 startAsForeground()；
+     *     ③ SdlReceiver.startSelf() 把 startService 改回 startForegroundService。
      */
-    private void startAsForeground() {
-        startForeground(NOTIF_ID, buildNotification());
-    }
-
-    /** 按当前连接状态构造通知 */
-    private Notification buildNotification() {
-        Notification.Builder b = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
-
-        String text = notificationText();
-
-        b.setContentTitle(APP_NAME)
-         .setContentText(text)
-         .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-         .setOngoing(true)
-         .setShowWhen(false)
-         .setOnlyAlertOnce(true);      // 每秒刷新也不响铃
-
-        try {
-            Intent i = new Intent(this, com.xigaigai.syncglance.activity.MainActivity.class);
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                    ? android.app.PendingIntent.FLAG_UPDATE_CURRENT
-                      | android.app.PendingIntent.FLAG_IMMUTABLE
-                    : android.app.PendingIntent.FLAG_UPDATE_CURRENT;
-            b.setContentIntent(android.app.PendingIntent.getActivity(this, 0, i, flags));
-        } catch (Exception ignored) { }
-
-        return b.build();
-    }
-
-    /**
-     * 通知副标题：只报**状态枚举**，绝不拼歌名/导航指令。
-     *
-     * 教训：以前这里是「显示中 · <歌名>」/「显示中 · <导航指令>」，
-     * 切歌、导航指令一变就刷一次通知栏，很吵。现在只在
-     * 「连接态 / HMI 等级 / 车机上显示什么类别 / Router 死活」变化时才变。
-     *
-     * 文案规则见 {@link com.xigaigai.syncglance.display.ConnectionStatus}。
-     */
-    private String notificationText() {
-        return com.xigaigai.syncglance.display.ConnectionStatus.text(
-                lifecycle == null ? null : lifecycle.getState(),
-                routerAlive,
-                closedOnce,
-                renderer == null ? null : renderer.currentState());
-    }
-
-    /** 状态变化时刷新通知。内容没变就跳过，省电。 */
-    private String lastNotifText;
-
-    public void updateNotification() {
-        try {
-            String text = notificationText();
-            if (text.equals(lastNotifText)) return;
-            lastNotifText = text;
-
-            // 通知被用户关掉时（importance=NONE），前台服务的可见性会打折，
-            // 系统也更容易回收。这里至少让日志能看出来。
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    NotificationChannel ch = nm.getNotificationChannel(CHANNEL_ID);
-                    if (ch != null && ch.getImportance() == NotificationManager.IMPORTANCE_NONE) {
-                        if (!warnedNoNotif) {
-                            warnedNoNotif = true;
-                            Log2.w(TAG, "⚠ 通知已被关闭，前台保活能力下降。"
-                                    + "请在系统设置里为 SyncPlay 重新开启通知");
-                        }
-                        return;
-                    }
-                }
-                nm.notify(NOTIF_ID, buildNotification());
-            }
-        } catch (Exception e) {
-            Log2.w(TAG, "刷新通知失败: " + e.getMessage());
-        }
-    }
-
-    private boolean warnedNoNotif = false;
 
     // ---------------- 连接 ----------------
 
@@ -643,7 +544,6 @@ public class SdlService extends Service {
                         }
                     });
             sdlManager.start();
-            updateNotification();
             Log2.i(TAG, "✓ SdlManager 已启动，等待车机连上并完成注册"
                     + "（appName=" + APP_NAME + ", appId=" + APP_ID + "）");
         } catch (Exception e) {
@@ -1057,9 +957,7 @@ public class SdlService extends Service {
         com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(
                 lifecycle.canSendRpc());
 
-        // 通知栏状态跟着走
         closedOnce = false;        // 又连上了，"连接关闭"作废
-        updateNotification();
 
         // 通知渲染器：连上/断开了都要重新评估能不能画
         renderer.onLifecycleChanged();
@@ -1356,13 +1254,13 @@ public class SdlService extends Service {
      *     车机重连 → ACL_CONNECTED → SdlReceiver/SdlRouterService 起路由
      *     → sdl.router.startservice / onSdlEnabled → 系统重新拉起本 Service → 重建 SdlManager
      *
-     *   所以前台通知只在**本 Service 存活期间**存在（正常就是车机连接期间）。
-     *   断开后通知会跟着消失 —— 这是官方语义的必然结果，不是 bug。
+     *   所以本 Service 只在**车机连接期间**存活，断开就退出。
      *
      *   千万不要加「每 5 秒重建、最多 12 次」这类应用层重试：会让车机侧
      *   反复看到同一个 appName 的注册请求，卡在「恢复连接」不动（踩过）。
-     *   也不要不 stopSelf 来硬撑常驻通知（试过，为了常驻通知而偏离官方语义，
-     *   最终按用户要求改回来了）。
+     *   也不要不 stopSelf 来硬撑常驻生命周期（试过，为了常驻通知而偏离官方语义，
+     *   最终按用户要求改回来了）。注意 2026-11-22 起本服务已不再持有通知，
+     *   但「断开即退出、靠广播链路重新拉起」这条语义没变。
      */
     private void handleConnectionClosed() {
         /*
@@ -1402,7 +1300,6 @@ public class SdlService extends Service {
             com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(false);
             renderer.onDisconnected();
             com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
-            updateNotification();
             retryHandler.postDelayed(this::startProxy, FAST_FAIL_RETRY_DELAY_MS);
             return;
         }
@@ -1432,8 +1329,6 @@ public class SdlService extends Service {
         renderer.onDisconnected();
         com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
 
-        // 断开瞬间先把通知刷成「未连接（连接关闭）」，随后 stopSelf 会连通知一起收走
-        updateNotification();
         stopSelf();          // ★ 官方语义：断开就退出，等广播链路重新拉起
     }
 }

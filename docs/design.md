@@ -635,6 +635,15 @@ Ford 自家 `Sync Destinations` 也是留空。
 
 ### 5.7 通知栏：连接状态通知（随连接生命周期）
 
+> ### ⚠ 2026-11-22：**本节描述的通知已被移除**
+>
+> `SdlService` 不再做前台服务、不再持有任何通知。原因、代价、验证方式与
+> 完整恢复步骤见 **[`docs/通知移除与存活权衡.md`](通知移除与存活权衡.md)**。
+>
+> 下文保留为历史设计记录（`ConnectionStatus.java` 仍在仓库里，恢复时可直接复用）。
+> 注意：`SdlService` 不再是前台服务，所以「通知寿命 = 服务寿命」这条
+> 现在说的是「服务寿命」，不再涉及通知。
+
 `SdlService` 挂着一条**不可清除**的通知（`setOngoing(true)`，dumpsys 里 flags 是
 `NO_CLEAR | FOREGROUND_SERVICE`），标题固定 `SyncPlay`，正文只报**状态枚举**。
 
