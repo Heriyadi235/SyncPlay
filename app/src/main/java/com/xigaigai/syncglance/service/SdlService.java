@@ -356,6 +356,27 @@ public class SdlService extends Service {
         isForeground = true;
         updateNotification();
 
+        /*
+         * 诊断：这条启动到底是谁发起的。
+         *
+         * 背景：`SdlReceiver.onSdlEnabled` 是**双路**启动 —— 先发 Router 递来的
+         * PendingIntent（官方 Android 12+ Must），再 `startSelf()` 兜底。
+         * 两者相隔只有 5ms 左右，光看"服务创建"根本分不清是哪条真正把服务拉起来的。
+         *
+         * 所以 `startSelf()` 会在 Intent 里塞 EXTRA_START_FROM_SELF。
+         * 日志里**只要出现一次「PendingIntent（官方路径）」，就证明官方那条真的到了服务**。
+         */
+        String startSource;
+        if (intent == null) {
+            // START_STICKY 被系统重启时 intent 为 null
+            startSource = "系统重启（intent=null）";
+        } else if (intent.getBooleanExtra(EXTRA_START_FROM_SELF, false)) {
+            startSource = "startSelf（兜底路径）";
+        } else {
+            startSource = "PendingIntent（官方 Android 12+ 路径）";
+        }
+        Log2.i(TAG, "服务启动来源: " + startSource);
+
         boolean forceReset = intent != null
                 && intent.getBooleanExtra(EXTRA_FORCE_RESET, false);
 
@@ -395,6 +416,14 @@ public class SdlService extends Service {
 
     /** 蓝牙重连时用的标记 */
     public static final String EXTRA_FORCE_RESET = "FORCE_RESET";
+
+    /**
+     * 诊断用：这条启动是 {@code SdlReceiver.startSelf()} 发起的（兜底路径）。
+     *
+     * <p>不带这个 extra 的启动 = 走的是 Router 递来的 PendingIntent（官方路径）。
+     * 见 {@link #onStartCommand} 里那段说明。</p>
+     */
+    public static final String EXTRA_START_FROM_SELF = "start_from_self";
 
     @Override
     public void onDestroy() {

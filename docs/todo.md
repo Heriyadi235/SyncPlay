@@ -278,12 +278,18 @@ OnLockScreenStatus { showLockScreen: REQUIRED, driverDistraction: true, hmiLevel
 - [x] **没有** `Unable to start service ... : not found`
 - [x] **没有** `ForegroundServiceStartNotAllowedException` / `★ 启动 SdlService 失败`
 - [x] 三轮都 `★ 进入 FULL`
-- [ ] ⚠ **仍无法确认"是哪条路真正拉起了服务"** —— 双路都在 5ms 内触发，
-      日志里 `服务创建` 出现在 `startSelf` 之后 4~6ms，分不清。
-      **要严格证明**：临时注释掉 `startSelf()` 再跑一轮；
-      或给 `startSelf` 的 Intent 加一个 `start_from_self=true` extra，
-      在 `onStartCommand` 里打出来 —— 若收到一次**不带**该 extra 的启动，就证明
-      PendingIntent 那条真的到了。
+- [ ] ⚠ 双路都在 5ms 内触发，日志里 `服务创建` 出现在 `startSelf` 之后 4~6ms，
+      **仍无法确认是哪条路真正拉起了服务**。
+      → **已加诊断日志**（2026-11-22 晚）：`startSelf()` 的 Intent 带
+      `start_from_self=true`，`SdlService.onStartCommand` 打出
+
+      ```
+      [SyncPlay] 服务启动来源: PendingIntent（官方 Android 12+ 路径）
+      [SyncPlay] 服务启动来源: startSelf（兜底路径）
+      [SyncPlay] 服务启动来源: 系统重启（intent=null）
+      ```
+
+      **下次上车只要日志里出现一次「PendingIntent（官方 Android 12+ 路径）」，就证明官方那条真的到了服务。**
 
 **T2 · 通知外观 —— ✅ 用户确认「通知没有问题」**
 

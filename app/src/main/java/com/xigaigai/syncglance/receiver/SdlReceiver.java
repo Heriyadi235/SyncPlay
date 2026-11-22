@@ -227,6 +227,12 @@ public class SdlReceiver extends SdlBroadcastReceiver {
                 i.putExtras(intent);
                 i.setAction(intent.getAction());
             }
+            /*
+             * 诊断标记：让 SdlService 能区分「这条启动是兜底路径发起的」。
+             * 不带它 = 走的是 Router 递来的 PendingIntent（官方路径）。
+             * 必须放在 putExtras(intent) 之后，免得被广播的 extras 覆盖。
+             */
+            i.putExtra(SdlService.EXTRA_START_FROM_SELF, true);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(i);
             } else {
