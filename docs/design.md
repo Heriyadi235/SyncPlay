@@ -639,28 +639,36 @@ Ford 自家 `Sync Destinations` 也是留空。
 
 ### 5.7 通知栏：连接状态通知（随连接生命周期）
 
-> ### ⚠ 2026-11-22：**本节描述的通知已被移除**
+> ### ✅ 2026-11-22 晚：通知已**恢复**，文案换了新格式
 >
-> `SdlService` 不再做前台服务、不再持有任何通知。原因、代价、验证方式与
-> 完整恢复步骤见 **[`docs/通知移除与存活权衡.md`](通知移除与存活权衡.md)**。
->
-> 下文保留为历史设计记录（`ConnectionStatus.java` 仍在仓库里，恢复时可直接复用）。
-> 注意：`SdlService` 不再是前台服务，所以「通知寿命 = 服务寿命」这条
-> 现在说的是「服务寿命」，不再涉及通知。
+> 当天白天曾整条移除，晚上查清「两条通知」是 SDL 固有设计后恢复
+> （[SDL-0309 提案](https://github.com/smartdevicelink/sdl_evolution/blob/master/proposals/0309-android-notifications.md)
+> 原文：router 一条 + 每个 app 一条，开发者无法影响，加开关的提案被 Rejected）。
+> 来龙去脉、文案矩阵、图标规格见
+> **[`docs/通知移除与存活权衡.md`](通知移除与存活权衡.md)** 第十二节。
 
-`SdlService` 挂着一条**不可清除**的通知（`setOngoing(true)`，dumpsys 里 flags 是
-`NO_CLEAR | FOREGROUND_SERVICE`），标题固定 `SyncPlay`，正文只报**状态枚举**。
+`SdlService` 挂着一条**不可清除**的通知（`setOngoing(true)`），
+标题固定为**应用名**「西改改的Sync」，
+小图标用 SDL 的 `sdl_tray_icon`，**不设大图标**（对齐官方 App 那条的样式）。
 
-**为什么正文不放歌名/导航指令**：那两个东西每秒都可能变，挂上去就会不停刷通知栏。
+正文风格对齐官方截图，**只报状态枚举**（不放歌名/导航指令，那两个每秒都可能变）：
 
-| 正文 | 条件 |
+```
+Connected through SDL (FULL: IDLE)              ← HMI 等级: 车机界面内容
+Connected through SDL (FULL: PLY/NAV)
+Connecting through SDL (Registering)            ← 连接中，卡在哪一步
+Connecting through SDL (Retrying 1/4)           ← 秒失败重试中
+Waiting for connection (Router listening)       ← 未连
+Connection closed                               ← 连过又断（几乎看不到，随即 stopSelf）
+```
+
+| 维度 | 取值 |
 |---|---|
-| `未连接（蓝牙未连接）` | Router 没跑 —— 根因是车机蓝牙没连上。**常态，不是故障** |
-| `未连接（Router 服务运行中）` | Router 在监听 RFCOMM，等车机来连 |
-| `未连接（连接关闭）` | 真的跟车机对上过话之后又断了 |
-| `已连接（正在注册）` | 传输层通了，车机还没回第一条 `OnHMIStatus` |
-| `已连接（未选中/后台/受限）` | HMI = `NONE` / `BACKGROUND` / `LIMITED`（车机屏幕上其实没显示） |
-| `已连接（空闲/歌曲/导航/歌曲·导航）` | HMI = `FULL`，按当前内容细分 |
+| HMI 等级 | `FULL` / `LIMITED` / `BACKGROUND` / `NONE` |
+| 界面内容 | `IDLE` / `PLY` / `NAV` / `PLY/NAV` |
+
+完整决策优先级（8 条）与 16 格矩阵见
+[通知移除与存活权衡.md §12.3](通知移除与存活权衡.md)。
 
 文案规则集中在 `display/ConnectionStatus.java`（纯逻辑，可单测）。
 
@@ -668,15 +676,12 @@ Ford 自家 `Sync Destinations` 也是留空。
 所以 `SyncRouterService`（我们自己的子类，跑在 `com.smartdevicelink.router` 独立进程）
 在 `onCreate` / `onStartCommand` / `onDestroy` 里发**应用内广播**上报，主进程被动接收。
 已知盲区：Router 进程被系统直接杀掉时 `onDestroy` 不回调，`routerAlive` 会停在
-「运行中」直到下次 Router 起来自愈（现在它只影响日志和秒失败判定，不再影响通知）。
+「运行中」直到下次 Router 起来自愈（影响日志、秒失败判定和通知正文里的 Router 状态）。
 
-> **⚠ 下面这段已过期（2026-11-22）**：原文是
-> 「通知的生命周期 = `SdlService` 的生命周期。断开时 `updateNotification()` 刷一下
-> 『未连接（连接关闭）』，紧接着 `stopSelf()` 把服务和通知一起收走……」
->
-> 通知已整条移除。仍然有效的是后半句的**设计意图**：为了显示去改连接生命周期是
-> 不做的（`AGENTS.md` §1.1），`SdlService` 依旧「断开就 `stopSelf()`、靠广播链路拉起」。
-> 若将来真要「没连也在」的展示，得在 `SdlService` 之外放一个只发通知的轻量前台服务。
+> **生命周期跟官方一致**：通知的生命周期 = `SdlService` 的生命周期。
+> 断开时刷一下「Connection closed」，紧接着 `stopSelf()` 把服务和通知一起收走。
+> 所以**没连车机时通知栏没有 SyncPlay** —— 这是刻意选择
+> （见 `AGENTS.md` §1.1：不为了显示去改连接生命周期）。
 
 ### 5.8 连接链路的真相：车机是主动方
 
@@ -765,10 +770,10 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 
 | 官方要求 | 本项目 | 说明 |
 |---|---|---|
-| 用**前台服务**承载 SDL，不能用 Activity | ⚠ 已偏离（2026-11-22） | 官方原话：Android 10 限制后台启动 Activity。我们改回**普通后台服务**并去掉通知，理由与回退步骤见 [通知移除与存活权衡.md](通知移除与存活权衡.md) |
-| Service 声明 `exported="true"`、`enabled="true"`、`foregroundServiceType="connectedDevice"` | ✅ 保留声明 | 服务本身已不进前台，声明无害；RouterService 仍需要 |
-| `onCreate` 里建通知渠道 + `startForeground` | ⛔ 已删除（2026-11-22） | 渠道 `syncglance` 也已在 `SyncGlanceApp` 里清理 |
-| **`onDestroy` 里 `stopForeground`，不要留通知** | ⛔ 已删除（2026-11-22） | 无通知可留 |
+| 用**前台服务**承载 SDL，不能用 Activity | ✅ `SdlService` | 官方原话：Android 10 限制后台启动 Activity。（2026-11-22 曾短暂降级为普通服务，当晚已恢复） |
+| Service 声明 `exported="true"`、`enabled="true"`、`foregroundServiceType="connectedDevice"` | ✅ | 应用在后台时 Router 可能拉不起服务 |
+| `onCreate` 里建通知渠道 + `startForeground` | ✅ | 渠道 `syncglance` / `IMPORTANCE_LOW`；`startForeground` 放在 `onStartCommand` 第一行（见下条） |
+| **`onDestroy` 里 `stopForeground`，不要留通知** | ✅ | `stopForeground(STOP_FOREGROUND_REMOVE)`，不删渠道 |
 | `onStartCommand` 里建 `SdlManager`，返回 `START_STICKY` | ✅ | 官方在 `onStartCommand` 里建；我们在外面套了 `needRebuild()`（已连接就复用）。**但这只在 `onSdlEnabled` 拉起服务时才有意义** —— 从系统广播直接启动会在 Router 就绪前抢跑，见 §5.4 |
 | `MultiplexTransportConfig` 作为传输 | ✅ | 2026-11-22 起**显式传 `FLAG_MULTI_SECURITY_OFF`**（跳过 `RouterServiceValidator` 信任校验，否则空队列路径会再多一刀秒退）。⚠ 它只拆掉一条附加失败路径，**不是**恢复连接失败的根因 —— 根因是车机响应延迟 2~7 秒、5.x 等不起，见 `连接可靠性排查.md` §10 |
 | `setAppTypes([MEDIA])` | ✅ | 决定车机把它归到「媒体 / 音频」 |
@@ -781,19 +786,19 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | `SdlManager` 实例不可复用，断开后必须新建 | ✅ | 用「代际号」`generation` 忽略旧对象的迟到回调 |
 | `SdlReceiver extends SdlBroadcastReceiver`，`exported="true"`，监听 `ACL_CONNECTED` + `sdl.router.startservice` | ✅ | 缺 `sdl.router.startservice` 会让 `queryForConnectedService` 直接抛异常 |
 | `defineLocalSdlRouterClass()` 返回自己的 Router 子类 | ✅ `SyncRouterService` | |
-| **`onSdlEnabled` 启动服务要分版本** | ⚠ 已简化（2026-11-22） | 官方要 Android 12+ 用 PendingIntent；我们**统一用 `startService`** —— Router 必先存在（它自己发的广播）且是同 uid 前台服务，后台启动限制结构上不会触发，见 连接可靠性排查.md §11.1 |
+| **`onSdlEnabled` 启动服务要分版本** | ⚠ 已偏离 | 官方要 Android 12+ 用 PendingIntent；我们**统一用 `startForegroundService`**（2026-11-22 恢复前台时改回） |
 
 **两处曾漏掉、2026-11-21 补齐的**：
 
 1. `SdlService` 的 `exported` 从 `false` 改 `true` —— 应用在后台时，
    Router/系统从外部启动服务需要它可以被外部访问
-2. `onSdlEnabled` 补 PendingIntent 路径 —— 官方对 Android 12+ 的推荐做法，
-   绕开「后台启动前台服务」的限制
+2. `onSdlEnabled` 补 PendingIntent 路径 —— 官方对 Android 12+ 的推荐做法
 
-> **2026-11-22 后续**：第 2 条已**撤回**。Router 给的是
-> `PendingIntent.getForegroundService(...)`，用它启动会落回「5 秒内必须
-> `startForeground`」的契约，与「不再持有通知」直接冲突；且历史上它从未真正
-> 拉起过 `SdlService`。现在只剩 `startService` 一条路。
+> **2026-11-22 后续**：第 2 条（PendingIntent 双路）**没有恢复**。Router 给的是
+> `PendingIntent.getForegroundService(...)`，历史上它从未真正拉起过 `SdlService`
+> （`send()` 成功但 `onCreate` 不执行，车机最终超时）；而
+> `startForegroundService` 已实测可靠（`连接可靠性排查.md` §11.1：Router 必先存在，
+> 同 uid 有前台服务，后台启动限制结构上不会触发）。
 
 > 我们额外做、官方 Integration Basics 里没有的：通知监听（`NotificationCatcher`）、
 > 高德 AmapLink 解密、`SyncPlayCore` 把数据采集与连接层解耦。这些属于业务，不影响
@@ -927,7 +932,7 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 |---|---|---|
 | `BLUETOOTH_CONNECT` | AppLink 通信 | 运行时弹窗 |
 | `BLUETOOTH_SCAN` | 蓝牙扫描 | 运行时弹窗 |
-| `FOREGROUND_SERVICE` | 前台服务（现仅供 RouterService 用；`SdlService` 已不是前台服务） | 自动 |
+| `FOREGROUND_SERVICE` | 前台服务（`SdlService` 与 RouterService 都要） | 自动 |
 | `FOREGROUND_SERVICE_CONNECTED_DEVICE` | 前台服务类型（同上） | 自动 |
 | `RECEIVE_BOOT_COMPLETED` | 开机自启 | 自动 |
 | `INTERNET` | 查歌词 | 自动 |

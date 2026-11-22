@@ -9,18 +9,18 @@
 > **2026-11-21 重要更新**：官方文档原文（6 份）已由用户提供，本文从"二手转述"
 > 升级为**有原文依据**。原文要点见第 1、2 节，风险见第 7 节。
 >
-> ### ⛔ 2026-11-22 全局失效声明：本应用不再有任何通知
+> ### ✅ 2026-11-22 晚：通知已恢复，撤销此前的「全局失效声明」
 >
-> 连接状态通知已整条移除，`SdlService` 也不再是前台服务
-> （见 [通知移除与存活权衡.md](通知移除与存活权衡.md)）。
+> 白天曾把连接状态通知整条移除（`SdlService` 降级为普通后台服务），
+> **当晚已恢复**：前台服务 + 常驻通知都在，文案换成官方截图那套
+> `Connected through SDL (HMI: 内容)`。
 >
-> **本文中所有涉及「手机端通知」的描述一律失效**，包括但不限于：
-> 「通知文案」「通知随服务消失」「通知残留」「通知依赖 RouterAlive」。
-> 这些行保留下来只为记录当时的设计，**不要再照着实现**。
-> 仍然有效的是：`stopSelf` 时机、`dispose` 顺序、HMI 等级流转、软键生命周期。
+> 所以本文中涉及「手机端通知」的描述**重新有效**，但**文案内容以
+> [通知移除与存活权衡.md](通知移除与存活权衡.md) §12.3 的矩阵为准**
+> （中文的「未连接（…）」「已连接（…）」那套已废弃）。
 >
-> 注：文中提到「**车机**通知」「SDL 通知」的地方指的是车机屏幕/系统那条，
-> 与本应用的通知无关，不受影响。
+> 恢复的原因：两条通知是 SDL 固有设计（SDL-0309 提案原文 + 官方 FAQ），
+> 应用侧关不掉，硬去掉只会白丢前台保护。
 
 ---
 
@@ -113,10 +113,10 @@ sdl.router.startservice
 
 | # | 官方要求 | 级别 | 我们的实现 | 判定 |
 |---|---|---|---|---|
-| 0 | **（前提）`SdlService` 是前台服务** | 官方示例前提 | ⛔ **2026-11-22 起已不是**：通知整条移除，改用 `startService` 拉起 | 有意偏离，见 `docs/通知移除与存活权衡.md` |
-| 1 | Service 声明 `exported="true"` + `enabled="true"` + `foregroundServiceType="connectedDevice"` | Note（API 31） | Manifest 保留声明（服务本身不再进前台，声明无害） | ✅ 保留 |
-| 2 | `onCreate` 里 `startForeground`（Android O+） | Note | ~~`startAsForeground()`~~ **已删除** | ⛔ 不适用：本服务**从不进前台**，这条只约束前台服务（见注①） |
-| 3 | `onDestroy` 里 `stopForeground(true)`，**不要把通知留在通知栏** | Note | ~~`stopForeground(STOP_FOREGROUND_REMOVE)`~~ **已删除** | ⛔ 不适用：没进过前台，就没有前台状态要收（见注①） |
+| 0 | **（前提）`SdlService` 是前台服务** | 官方示例前提 | ✅ **是**（2026-11-22 白天曾短暂降级为普通服务，当晚恢复） | 与官方一致 |
+| 1 | Service 声明 `exported="true"` + `enabled="true"` + `foregroundServiceType="connectedDevice"` | Note（API 31） | Manifest 已声明 | ✅ |
+| 2 | `onCreate` 里 `startForeground`（Android O+） | Note | ✅ 已恢复；`startForeground` 放在 `onStartCommand` 第一行（更贴近 API 契约） | ✅ 等价 |
+| 3 | `onDestroy` 里 `stopForeground(true)`，**不要把通知留在通知栏** | Note | ✅ 已恢复：`stopForeground(STOP_FOREGROUND_REMOVE)` | ✅ 等价 |
 | 4 | 官方还 `deleteNotificationChannel` | 示例代码 | 我们**不删渠道**（渠道已不再创建） | ⚠ 已整体移除 |
 | 5 | `onStartCommand` 里 `if (sdlManager == null)` 才建 | 示例 | `needRebuild()`：null **或** 已 DISCONNECTED 都重建 | ✅ 更严格 |
 | 6 | `return START_STICKY` | 示例 | 保留 | ✅ |
@@ -132,8 +132,8 @@ sdl.router.startservice
 | 16 | Router Service 的 intent-filter `com.smartdevicelink.router.service` | **Must** | 有 | ✅ |
 | 17 | Router Service 必须在 `com.smartdevicelink.router` 进程 | **Must** | `android:process="com.smartdevicelink.router"` | ✅ |
 | 18 | `sdl_router_version` meta-data | 要求 | 有（`@integer/sdl_router_service_version_value`） | ✅ |
-| 19 | `onSdlEnabled` 里 **S 及以上用 PendingIntent** 启动 | **Must**（API 31+） | ⚠ **已偏离**：2026-11-22 起统一用 `startService`，PendingIntent 路径已删除 | 有意偏离，三条理由见注② |
-| 20 | **API 34+ 要先检查 `AndroidTools.hasForegroundServiceTypePermission(context)`**，没有就 return | **Must**（API 34+） | ⛔ 已删除（2026-11-22）：不再启动 FGS，无需此检查 | 不适用 |
+| 19 | `onSdlEnabled` 里 **S 及以上用 PendingIntent** 启动 | **Must**（API 31+） | ⚠ **仍偏离**：统一用 `startForegroundService`，PendingIntent 路径未恢复 | 有意偏离，理由见注② |
+| 20 | **API 34+ 要先检查 `AndroidTools.hasForegroundServiceTypePermission(context)`**，没有就 return | **Must**（API 34+） | ✅ 已恢复 | ✅ 2026-11-22 恢复前台时一并恢复 |
 | 21 | `getSdlServiceName()` 默认返回 `"SdlService"`，类名不同要覆写 | Note | 我们的类就叫 `SdlService`，默认值正确 | ✅ |
 | 22 | `MultiplexTransportConfig` 连车机 | 要求 | `new MultiplexTransportConfig(ctx, APP_ID)` | ✅ |
 | 23 | 官方示例传 `FLAG_MULTI_SECURITY_OFF` | 示例 | 已传（2026-11-22） | ✅ 传了。**但它不是恢复连接失败的根因** —— 根因是车机响应延迟 2~7 秒、5.x 等不起（见 §7.3 开头的更正 与 连接可靠性排查.md §10） |
@@ -142,42 +142,42 @@ sdl.router.startservice
 | 26 | 软键：**不要混用 ScreenManager 与手动 `Show`** | Note | 只用手动 `Show` | ✅ |
 | 27 | 软键 ID `0~10000` 是 ScreenManager 保留区 | Note | 我们用 9001/9002/9003 | ⚠ 不冲突（不用 ScreenManager），但记一笔 |
 
-### 注①：为什么第 2、3 条「不适用」——「前台服务不带通知」存在吗？
+### 注①：「前台服务不带通知」存在吗？（第 2、3 条的背景）
 
 **不存在（至少在公共 API 上不存在）。**
 
 | 事实 | 说明 |
 |---|---|
 | `startForeground(int id, Notification notification)` | 参数标 `@NonNull`，**没有「不带通知」的重载**；传 `null` 直接 NPE / `IllegalArgumentException` |
-| `STOP_FOREGROUND_DETACH` | 语义是「**停止前台**、把通知**留在**通知栏变成普通通知」 —— 与「留前台、去通知」方向正好相反，不能拿来当隐藏手段 |
+| `STOP_FOREGROUND_DETACH` | 语义是「**停止前台**、把通知**留在**通知栏变成普通通知」—— 与「留前台、去通知」方向正好相反，不能拿来当隐藏手段 |
 | 通知渠道 `IMPORTANCE_NONE` | 能让通知不显示，但属系统漏洞级 hack：不同版本/ROM 行为不一致（可能被强制显示、或渠道被系统重建），**不可依赖**，本项目不用 |
-| 用户手动划掉 | Android 13+ 起用户可以从通知栏划掉前台服务通知，服务**仍是前台**。等于「用户帮你藏」，但不可编程控制，也不能写进设计 |
+| 用户手动关闭 | **官方 FAQ「SDL Notifications」就是这么建议的**：长按通知 → 关闭。与「划掉」不同，这是持久禁用；而服务**仍是前台**，保活不受影响 |
 
 **结论：是二选一 —— 要么带一条通知进前台，要么不进前台。**
-2026-11-22 按用户要求选了后者，因此第 2 条（`onCreate` 里 `startForeground`）与
-第 3 条（`onDestroy` 里 `stopForeground`）作为「前台服务的配套约束」自然不再适用，
-而不是我们没落实。若将来重新引入前台服务，**这两条必须一起恢复**，
-否则会触发 `Context.startForegroundService() did not then call Service.startForeground()`。
 
-### 注②：第 19 条（S+ 用 PendingIntent 启动）为什么偏离
+2026-11-22 白天曾按用户要求选了「不进前台」（第 2、3 条随之失效）；
+**当晚已改回「带通知进前台」，故第 2、3 条重新落实**（见表格）。
+这条二选一关系的价值在于：如果哪天又想去掉通知，必须同时去掉前台状态，
+并接受后台存活变弱（细节见 `docs/通知移除与存活权衡.md` 第六节）。
+
+### 注②：第 19 条（S+ 用 PendingIntent 启动）为什么仍偏离
 
 官方这条是 **Must**，目的是**绕开 Android 12+ 对「后台启动前台服务」的限制**。
-我们偏离，理由三条：
+我们目前仍只走 `startForegroundService`，理由：
 
-1. **前提消失**：Router 递来的 `pending_intent` 是
-   `PendingIntent.getForegroundService(...)`。用它启动就等于「以 FGS 方式启动」，
-   落回「5 秒内必须 `startForeground`」的契约 —— 与本服务已不持有通知**直接冲突**，
-   要么崩（`did not then call Service.startForeground`），要么通知又回来。
-2. **它历史上从未真正拉起过 `SdlService`**：2026-11-21 实车日志里
+1. **它历史上从未真正拉起过 `SdlService`**：2026-11-21 实车日志里
    `PendingIntent.send()` 返回成功（没抛 `CanceledException`），但
    `SdlService.onCreate` 压根没执行，车机侧最后超时。
-3. **结构上不需要**：`sdl.router.startservice` 是 Router 自己发出的，
+   （Router 给的是 `PendingIntent.getForegroundService(...)`，而目标 Intent
+   只有 `setPackage`，没有 component。）
+2. **结构上不需要额外保险**：`sdl.router.startservice` 是 Router 自己发出的，
    所以 `onSdlEnabled` 到达时 Router 必然已在跑，且它是**同 uid 的前台服务**
-   → 整个 uid 不处于「后台」状态，`startService` 不会被拦。
-   2026-11-22 四轮实测全部通过（`连接可靠性排查.md` §11.1）。
+   → 整个 uid 不处于「后台」状态。
+3. 2026-11-22 四轮实测全部通过（`连接可靠性排查.md` §11.1），
+   恢复前后都没出现后台启动被拦。
 
-⚠ **回退条件**：一旦重新引入前台服务，第 19 条这条 **Must 需要恢复**，
-否则 Android 12+ 在后台可能起不来 FGS。
+⚠ **仍需留意**：这条是官方 **Must**。若某天在别的机型/ROM 上出现
+`ForegroundServiceStartNotAllowedException`，第一件事就是补回 PendingIntent 路径。
 
 ---
 
@@ -208,10 +208,11 @@ onSdlEnabled → startForegroundService → onCreate（建通知）      ← 官
              → onDestroy（stopForeground + flushNow + dispose）
 ```
 
-> **本项目的实际情况（2026-11-22 起）**：前后两处与官方不同 ——
-> `startForegroundService` → **`startService`**，`onCreate` **不建通知**，
-> `onDestroy` 也**没有 `stopForeground`**。中间「`onStartCommand` → 连接期间常驻 →
-> 断开即 `stopSelf()`」这一段与官方一致。原因见
+> **本项目的实际情况（2026-11-22 晚）**：与官方**一致**。
+> 唯一的小差别是 `startForeground` 写在 `onStartCommand` 第一行而不是 `onCreate`
+> （更贴近「`startForegroundService` 后 5 秒内必须 `startForeground`」的契约），
+> 通知由 `onStartCommand → startAsForeground()` 建立。
+> 白天曾短暂改成「普通服务 + 无通知」，当场已回退，原因见
 > `docs/通知移除与存活权衡.md`。
 
 ### 3.3 软键的生命周期（**独立于上面两个**）
@@ -248,7 +249,7 @@ FULL + 数据变化 → flush() → Show(含 softButtons) → 车机画出来
 | 4 | 库 + 车机 | SDP → RFCOMM → 连上 Router | — |
 | 5 | 库 | 回调 `onSdlEnabled` | `[SdlReceiver] ★ onSdlEnabled` |
 | 6 | `SdlReceiver` | 双路启动服务 | `已直接启动 SdlService` |
-| 7 | `SdlService` | `onCreate` → 前台服务（~~建通知~~ 已于 11-22 移除） | `[SyncPlay] 服务创建` |
+| 7 | `SdlService` | `onCreate` → 前台服务（`onStartCommand` 里 `startForeground` + 建通知） | `[SyncPlay] 服务创建` |
 | 8 | `SdlService` | `onStartCommand` → `startProxy()` | `启动时发现连接不可用…重建连接` |
 | 9 | `SdlService` | `SdlManager.build().start()` | `✓ SdlManager 已启动` |
 | 10 | 车机 | `OnPermissionsChange` → `OnHMIStatus` NONE→BACKGROUND→LIMITED→FULL | `→ 已连接(FULL)` |
@@ -326,7 +327,7 @@ FULL + 数据变化 → flush() → Show(含 softButtons) → 车机画出来
 > ⚠ 这里**故意不**调 `NotificationCatcher.setMusicListener(null)` ——
 > 那会把数据采集一起掐死（踩过）。
 
-**软键**：随会话结束消失。~~手机通知也消失。~~（不再有通知）
+**软键**：随会话结束消失；手机通知也消失（服务 `stopSelf` 时一并收走）。
 
 ---
 
@@ -485,7 +486,7 @@ if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) return;   //
 | 1 | `queryForConnectedService` 在 **`SyncGlanceApp.onCreate`** 也调 | 应用可能因广播被拉起、界面没开，需补探测 | 🟢 多次成功 |
 | 2 | 保留 `BootReceiver`（官方没有） | 记录启动来源 + 蓝牙白名单 | 🟢 |
 | 3 | `onSdlEnabled` **双路启动**（`startSelf` + PendingIntent） | 官方二选一；踩过 `pendingIntent.send()` 返回成功但服务没起来 | 🟢 12:49 日志 |
-| 4 | `RouterAlive` 跨进程广播（`ROUTER_ALIVE/DEAD`） | 5.8 没有 `isRouterServiceRunning()` | 🟢 ~~通知依赖它~~ 现用于日志与秒失败判定 |
+| 4 | `RouterAlive` 跨进程广播（`ROUTER_ALIVE/DEAD`） | 5.8 没有 `isRouterServiceRunning()` | 🟢 通知正文依赖它 |
 | 5 | `MainActivity` 的「唤醒车机发现」按钮 | 本车不自动发现 App | 🟢 |
 | 6 | `closedOnce` + `ConnectionStatus` 六种文案 | 官方只要求前台通知，未规定文案 | — 现为**死代码**，随通知移除 |
 | 7 | `handleConnectionClosed` 里 `stopSelf()` 前先 `updateNotification()` | 让状态可见 | — |
@@ -504,10 +505,11 @@ if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) return;   //
 
 ## 7. 已落实项 / 仍存在的风险
 
-### 7.1 ⛔ API 34+ 前台服务权限检查（2026-11-21 补 → 2026-11-22 已删除）
+### 7.1 ✅ API 34+ 前台服务权限检查（2026-11-21 补 → 11-22 删 → 11-22 晚恢复）
+
+`SdlReceiver.onSdlEnabled` 里，启动服务之前先做官方那道检查：
 
 ```java
-// 曾经在 SdlReceiver.onSdlEnabled 里：
 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
     if (!AndroidTools.hasForegroundServiceTypePermission(context)) {
         Log2.w(TAG, "缺少 connectedDevice 前台服务权限，按官方要求放弃启动 SdlService");
@@ -516,15 +518,14 @@ if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
 }
 ```
 
-**已删除**：这段是「启动 `connectedDevice` 类型前台服务」的前置校验。2026-11-22
-`SdlService` 不再进前台、`onSdlEnabled` 改用 `startService`，校验失去意义
-（留着反而可能误挡启动）。背景保留如下，供回退时参考：
+**为什么需要**（背景）：
 
 > API 34 起启动带 `connectedDevice` 类型的 FGS 必须有「已连接的设备」或对应权限，
 > 否则 `startForegroundService` 抛异常。我们以前没检查，异常被吃掉，车机侧表现为超时。
 > 本机是 **Android 15（API 35）**，早在这条规则适用范围内。
 
-见 `docs/通知移除与存活权衡.md` §2.2。
+2026-11-22 白天去掉前台服务时删过这段；当晚恢复前台时一并恢复。
+外面仍套着 try/catch：检查本身出错不能挡住启动。
 
 ### 7.2 ✅ Router 类名已改为 `SdlRouterService`（2026-11-21）
 
