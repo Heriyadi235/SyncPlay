@@ -77,6 +77,8 @@ public class SyncGlanceApp extends Application {
 
         if (!isMainProcess()) return;
 
+        removeLegacyNotificationChannel();
+
         SyncPlayCore.get().init(this);
 
         Log2.i(TAG, "应用启动，补一次「现在有没有已连接的车机」探测");
@@ -95,6 +97,31 @@ public class SyncGlanceApp extends Application {
             Log2.i(TAG, "补连接首次失败，2 秒后重试一次");
             SdlReceiver.pokeIfBluetoothConnected(this);
         }, 2000);
+    }
+
+    /**
+     * 清掉 2026-11-22 之前创建的旧通知渠道。
+     *
+     * <p>连接状态通知本身已经不再发了（见 {@code docs/通知移除与存活权衡.md}），
+     * 但**通知渠道一旦创建就永久留在系统设置里**，应用不主动删就删不掉 ——
+     * 用户会在「设置 → 通知」里看到一个永远不会有通知的
+     * 「SyncPlay 连接状态」类别。</p>
+     *
+     * <p>幂等：渠道不存在时 {@code deleteNotificationChannel} 是 no-op，
+     * 所以每次启动调一次即可（一次 binder 调用，代价可忽略）。</p>
+     */
+    private void removeLegacyNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        try {
+            android.app.NotificationManager nm =
+                    getSystemService(android.app.NotificationManager.class);
+            if (nm != null && nm.getNotificationChannel("syncglance") != null) {
+                nm.deleteNotificationChannel("syncglance");
+                Log2.i(TAG, "已清掉旧通知渠道 syncglance（连接状态通知已移除）");
+            }
+        } catch (Exception ignored) {
+            // 清理失败不影响功能
+        }
     }
 
     /**
