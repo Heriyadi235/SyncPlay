@@ -124,6 +124,11 @@ app/src/main/java/com/xigaigai/syncglance/
 | [docs/development.md](docs/development.md) | **实现与踩坑**：连接坑、按键去重、ETA 时刻、缓存策略、20+ 条实测教训 |
 | [docs/todo.md](docs/todo.md) | 待办：锁屏界面（Ford 必测项）、VR Help、PRESET 绑定、权限缓存等 |
 | [docs/device-connection.md](docs/device-connection.md) | 设备型号、adb 路径、安装/调试命令、启动失败对照表 |
+| [docs/连接可靠性排查.md](docs/连接可靠性排查.md) | **连接问题必读**：秒退根因、受控重试、唤醒链路卡口、复测数据 |
+| [docs/通知移除与存活权衡.md](docs/通知移除与存活权衡.md) | 为什么去掉常驻通知、代价、验证清单、**可照抄的回退步骤** |
+| [docs/两分支维护.md](docs/两分支维护.md) | `main`（SDL 5.8）与 `legacy/sdl4`（4.12.2）的同步规则与有意差异 |
+| [docs/sdl5-机制与生命周期.md](docs/sdl5-机制与生命周期.md) | 5.x 与 4.x 的 API 对照、按 FunctionID 注册回调等机制差异 |
+| [docs/sdl生命周期-场景对照.md](docs/sdl生命周期-场景对照.md) | 官方要求逐条对照 + 实车场景时间线 |
 
 > 外部资料（Ford 官方 1.6 文档、车机权限矩阵、固件逆向结论）不在本仓库内。
 > 注意它们在个别结论上已过时：例如旧资料说车机语言是 `EN-GB`、软键必须用
