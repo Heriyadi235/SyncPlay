@@ -200,10 +200,14 @@ intent-filter，只能靠显式组件启动 —— 所以这个 PendingIntent �
 「同 uid 的 Router 前台服务让整个 uid 不算后台」这一事实
 （证据链见 `连接可靠性排查.md` §11.1：4 轮实测 Router 上线均早于 `onSdlEnabled`）。
 
-> ⚠ **两个待验证/待观察点**（诚实记账）：
-> 1. 到 2026-11-22 的实车测试为止，跑的都是 `startService` 版本；
->    **恢复成 `startForegroundService` 之后还没上过车**。下次上车要确认日志里
->    没有 `ForegroundServiceStartNotAllowedException`。
+> ⚠ **两条诚实记账**：
+> 1. **`startForegroundService` 这条路本身已实车验证过** —— 2026-11-22 20:36~20:39
+>    （通知移除**之前**那一版）四轮全部成功：
+>    `已直接启动 SdlService（startForegroundService）` → `★ 进入 FULL`。
+>    恢复后的版本与当时**启动路径、前台机制完全相同**（都是
+>    `onStartCommand` 首行 `startForeground` + `onDestroy` 里 `stopForeground`），
+>    只改了通知的文案与图标。所以没有"没上过车"这回事。
+>    真正还没验的只是**新文案/新图标在车机上的观感**。
 > 2. 万一在别的机型/ROM 上被拦，**没有官方 PendingIntent 这条路可退** ——
 >    届时只能考虑给 `SdlService` 加 intent-filter 让它可被 action 匹配，
 >    或退回「应用侧不持有 FGS + 用户长按关通知」那套。
