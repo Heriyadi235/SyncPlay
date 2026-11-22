@@ -66,25 +66,36 @@
 
 **要试的三条路**（按可行性排序）：
 
-1. **先抓系统侧日志**，确认 `send()` 之后系统到底报了什么
-   （预期是 `Unable to start service ...` 之类）：
+1. ✅ **已完成（2026-11-22 23:27，本机用 `am start-foreground-service` 复现）**
 
-   ```powershell
-   & $adb logcat -b system,main -v time | Select-String 'Unable to start service|startForegroundService|SdlService'
-   ```
+   | 实验 | Intent 形态 | 结果 |
+   |---|---|---|
+   | 1 | `act=sdl.router.startservice` + `pkg` | ❌ `Unable to start service ... **not found**` |
+   | 2 | `act=com.smartdevicelink.router.service` + `pkg`（Router 真正声明的那个） | ✅ 解析到 `SdlRouterService` 并拉起进程 |
+   | 3 | 只有 `pkg`（无 action、无 component） | ❌ 什么都没起 |
 
-2. **给 `SdlService` 加 intent-filter**，让那个 action 能解析到它。
-   ⚠ 两个未知障碍：
-   - `sdl.router.startservice` 现在挂在 `SdlReceiver`（receiver）上，加给 service 会不会冲突未知
-   - Android 5+ 要求**服务 Intent 必须显式**（带 component），而库那个只有 package
-     —— 可能被系统直接拒
-3. **自建 PendingIntent**：
-   `PendingIntent.getForegroundService(ctx, 0, new Intent(ctx, SdlService.class), flags)`
+   **两条硬结论**：
+   - 失败原因是**「没有 service 声明 `sdl.router.startservice`」**
+     （那个 action 只挂在 `SdlReceiver` 这个 **receiver** 上），
+     **不是**「隐式 Intent 不合法」
+   - **实验 2 证明「package + action」的隐式服务 Intent 合法且能解析**
+     （Android 5+ 的「服务 Intent 必须显式」检查接受 `setPackage`）
+
+2. **给 `SdlService` 加 intent-filter**（声明 `sdl.router.startservice`）——
+   **从「存疑」升级为「可行」**：实验 2 已证明只要 action 对应到某个声明它的 service
+   就能解析；而 receiver 与 service 的解析空间**互不影响**，与 `SdlReceiver` 的同名
+   action **不冲突**。这样 Router 那个 PendingIntent（fillIn 后带该 action）就能
+   解析到我们的 `SdlService` —— **真正落实官方 Must，且保留豁免语义**。
+   落地时保留 `startSelf()` 作兜底，形成官方建议的「双路」。
+
+3. **自建 PendingIntent**：`PendingIntent.getForegroundService(ctx, 0, Intent(ctx, SdlService.class), flags)`
    —— 能指名服务，但**失去官方说的豁免意义**（豁免来自「由 Router 这个前台服务创建它」），
-   等于绕一圈回到 `startForegroundService`，只多了一层包装。
+   等于绕一圈回到 `startForegroundService`，只多了一层包装。**只在第 2 条失败时才考虑。**
+
+**下一步**：按路线 2 改 Manifest + 恢复 `startViaPendingIntent()` 做双路，然后上车验证。
 
 **验收**：上车日志出现 PendingIntent 路径且 `★ 进入 FULL`；
-或确认三条路都不行 —— 把「无法落实」的结论与证据写回
+若路线 2 也失败，把「无法落实」的结论与证据写回
 [`sdl生命周期-场景对照.md`](sdl生命周期-场景对照.md) 注②。
 
 **为什么值得试**：`startForegroundService` 现在能过，靠的是
