@@ -770,7 +770,7 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | `onCreate` 里建通知渠道 + `startForeground` | ⛔ 已删除（2026-11-22） | 渠道 `syncglance` 也已在 `SyncGlanceApp` 里清理 |
 | **`onDestroy` 里 `stopForeground`，不要留通知** | ⛔ 已删除（2026-11-22） | 无通知可留 |
 | `onStartCommand` 里建 `SdlManager`，返回 `START_STICKY` | ✅ | 官方在 `onStartCommand` 里建；我们在外面套了 `needRebuild()`（已连接就复用）。**但这只在 `onSdlEnabled` 拉起服务时才有意义** —— 从系统广播直接启动会在 Router 就绪前抢跑，见 §5.4 |
-| `MultiplexTransportConfig` 作为传输 | ✅ | 官方示例多传 `FLAG_MULTI_SECURITY_OFF`；我们用默认安全等级（实车能连，不擅自放宽） |
+| `MultiplexTransportConfig` 作为传输 | ✅ | 2026-11-22 起**显式传 `FLAG_MULTI_SECURITY_OFF`**（跳过 `RouterServiceValidator` 信任校验，否则空队列路径会再多一刀秒退）。⚠ 它只拆掉一条附加失败路径，**不是**恢复连接失败的根因 —— 根因是车机响应延迟 2~7 秒、5.x 等不起，见 `连接可靠性排查.md` §10 |
 | `setAppTypes([MEDIA])` | ✅ | 决定车机把它归到「媒体 / 音频」 |
 | `setShortAppName` | ✅ | 车机列表里用短名 |
 | `setAppIcon` | ⛔ 故意不做 | 本车 `graphicSupported=false`，图标用不了 |
