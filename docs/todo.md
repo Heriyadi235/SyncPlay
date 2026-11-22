@@ -48,7 +48,49 @@
 
 ### A · 生命周期
 
-*（autoActivateID 已完成，本组暂无遗留）*
+#### A1 · 按官方 Must 用 PendingIntent 启动 `SdlService` 🔴 待尝试
+
+> 用户要求「强迫症般对齐官方实现」，所以这条即使当前走不通也要留在待办里。
+
+**目标**：官方 Integration Basics 要求 Android 12+（API 31+）在 `onSdlEnabled` 里
+用 Router 递来的 `TransportConstants.PENDING_INTENT_EXTRA` 启动服务，
+而不是自己 `startForegroundService`。我们目前**只走后者**。
+
+**为什么现在走不通**（2026-11-22 查实）：
+
+- 反编译 `SdlRouterService` 发送广播那段，它建的 PendingIntent 目标 Intent 是
+  `new Intent().setPackage(getPackageName())` —— **没有 component、没有 action**
+- 而 `SdlService` 在 Manifest 里**没有任何 intent-filter**，只能靠显式组件启动
+- 2026-11-21 12:49 实车日志：`已通过 PendingIntent 启动 SdlService`（`send()` 成功、无异常），
+  但 `SdlService.onCreate` **从未执行**，车机最后超时
+
+**要试的三条路**（按可行性排序）：
+
+1. **先抓系统侧日志**，确认 `send()` 之后系统到底报了什么
+   （预期是 `Unable to start service ...` 之类）：
+
+   ```powershell
+   & $adb logcat -b system,main -v time | Select-String 'Unable to start service|startForegroundService|SdlService'
+   ```
+
+2. **给 `SdlService` 加 intent-filter**，让那个 action 能解析到它。
+   ⚠ 两个未知障碍：
+   - `sdl.router.startservice` 现在挂在 `SdlReceiver`（receiver）上，加给 service 会不会冲突未知
+   - Android 5+ 要求**服务 Intent 必须显式**（带 component），而库那个只有 package
+     —— 可能被系统直接拒
+3. **自建 PendingIntent**：
+   `PendingIntent.getForegroundService(ctx, 0, new Intent(ctx, SdlService.class), flags)`
+   —— 能指名服务，但**失去官方说的豁免意义**（豁免来自「由 Router 这个前台服务创建它」），
+   等于绕一圈回到 `startForegroundService`，只多了一层包装。
+
+**验收**：上车日志出现 PendingIntent 路径且 `★ 进入 FULL`；
+或确认三条路都不行 —— 把「无法落实」的结论与证据写回
+[`sdl生命周期-场景对照.md`](sdl生命周期-场景对照.md) 注②。
+
+**为什么值得试**：`startForegroundService` 现在能过，靠的是
+「同 uid 有 Router 前台服务 → 整个 uid 不算后台」这个事实
+（证据见 `连接可靠性排查.md` §11.1）。官方这条 Must 本来就是为这种场景准备的保险，
+只是 5.8.0 没给到可用的 Intent。
 
 ---
 
