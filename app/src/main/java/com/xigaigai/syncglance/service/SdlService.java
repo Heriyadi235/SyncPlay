@@ -204,11 +204,16 @@ public class SdlService extends Service {
     /** 秒失败判定阈值：建连后这么短时间内就断，视为「传输根本没建立」 */
     private static final long FAST_FAIL_MS = 500;
 
-    /** 秒失败重试延迟 */
-    private static final long FAST_FAIL_RETRY_DELAY_MS = 1500;
+    /**
+     * 秒失败重试延迟。
+     *
+     * 2026-11-22 从 1500 调到 2500：实车（SDL4 对照组）证明车机在蓝牙 ACL 建立后
+     * 有 6~7 秒的「犹豫期」才发起 SDL 连接。2.5s × 4 次 = 10 秒，盖住这个窗口并留余量。
+     */
+    private static final long FAST_FAIL_RETRY_DELAY_MS = 2500;
 
-    /** 秒失败最多重试次数 */
-    private static final int FAST_FAIL_MAX_RETRY = 2;
+    /** 秒失败最多重试次数（2.5s × 4 = 10 秒覆盖窗口） */
+    private static final int FAST_FAIL_MAX_RETRY = 4;
 
     /**
      * 这次进程起来之后，是否"连上过又断开了"。
