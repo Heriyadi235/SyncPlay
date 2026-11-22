@@ -1988,7 +1988,8 @@ $adb = "C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 - [ ] **通知栏状态是否跟着变**：`Waiting for connection (…)` → `Connecting through SDL (…)`
       → `Connected through SDL (FULL: PLY)`，格式见 `docs/通知移除与存活权衡.md` §12.3
 - [ ] **断开后通知是否随服务一起消失**（官方语义：通知寿命 = 服务寿命）
-- [ ] 日志第一行能看到 `【启动来源】`，确认是被什么拉起的
+- [ ] 日志里能看到 `【进程被拉起】` 或 `【进程已运行】收到` + 广播名，
+      确认是被什么拉起的（2026-11-22 起替代旧的「启动来源」措辞）
 
 ### 14.2 断连重连（重点）
 

@@ -44,9 +44,25 @@ public class SyncGlanceApp extends Application {
 
     private static final String TAG = "Boot";
 
+    /**
+     * 本进程启动时刻（{@link android.os.SystemClock#elapsedRealtime()}）。
+     *
+     * <p>用途：{@code BootReceiver} 判断「这条广播是不是**把进程从零拉起**的那条」，
+     * 从而把日志区分为「进程被拉起」和「进程已运行，收到广播」。</p>
+     *
+     * <p>不要写成 {@code System.currentTimeMillis()} —— 那个会被系统对时改掉。</p>
+     */
+    private static long processStartAtMs = 0;
+
+    /** 本进程启动时刻；0 = 还没记录（理论上不会发生） */
+    public static long processStartAtMs() { return processStartAtMs; }
+
     @Override
     public void onCreate() {
         super.onCreate();
+
+        // 第一件事：记下进程启动时刻，越早越准
+        processStartAtMs = android.os.SystemClock.elapsedRealtime();
 
         /*
          * ★ 日志能力两个进程都要（Router 进程也要打日志），

@@ -10,6 +10,23 @@ import com.xigaigai.syncglance.util.Log2;
 /**
  * 蓝牙/开机事件 → <b>只记日志</b>（不建连接，也不调探测 API）。
  *
+ * <h3>⚠ 本类不负责"拉起"，别误会（2026-11-22 澄清）</h3>
+ *
+ * 它虽然声明了 {@code ACL_CONNECTED}，但 <b>一个 start 都没调</b>。
+ * 真正把 Router 拉起来的是 {@link SdlReceiver}（继承库的
+ * {@code SdlBroadcastReceiver}）：库的 {@code onReceive} 匹配到 {@code ACL_CONNECTED}
+ * 后调 {@code wakeUpRouterService()} → {@code startForegroundService(RouterService)}。
+ *
+ * <p>所以本类里的 {@code ACL_CONNECTED} 监听**对"拉起"是冗余的** ——
+ * 删掉它不影响任何连接行为。留着是因为：</p>
+ * <ul>
+ *   <li>它是唯一记得「**谁把进程叫醒的**」的地方（{@code SdlReceiver} 只在车机
+ *       真正连通 Router 后才打 {@code onSdlEnabled}，中间那段没人记）；</li>
+ *   <li>{@code ACL_DISCONNECTED} / {@code BOOT_COMPLETED} / {@code STATE_CHANGED} /
+ *       {@code MY_PACKAGE_REPLACED} 只有它监听；</li>
+ *   <li>零成本：同一次广播，进程只会被拉起一次，多一个 receiver 不多耗电。</li>
+ * </ul>
+ *
  * <h3>它不负责连接，也不负责探测（2026-11-21 修正）</h3>
  *
  * 这个类两度踩雷，两样都被拿掉了：
@@ -33,7 +50,7 @@ import com.xigaigai.syncglance.util.Log2;
  * <p>所以本类现在的唯一价值：</p>
  * <ul>
  *   <li>蓝牙设备白名单判断（只认真车机，忽略耳机音箱）</li>
- *   <li>把「启动来源」写进日志，排查时能看出来是谁叫醒的应用</li>
+ *   <li>把「唤醒来源」和「进程是冷启动还是已在跑」写进日志，排查时能看出来是谁叫醒的应用</li>
  * </ul>
  */
 public class BootReceiver extends BroadcastReceiver {
@@ -55,8 +72,13 @@ public class BootReceiver extends BroadcastReceiver {
                  * 进程是被这条广播拉起来的 → SyncGlanceApp.onCreate 必然先跑，
                  * 它已经用 Application context 探测过了。
                  * 这里再探测一次不但多余，还**会闪退** —— 原因见下面 ACL_CONNECTED 的注释。
+                 *
+                 * ⚠ 注意：国内 ROM / 系统组件会把 BOOT_COMPLETED **重复补发**，
+                 *   与真实开机无关（实测 4 小时内收到 4 次，而 uptime 没重置）。
+                 *   所以这行日志里的「进程被拉起」不代表手机重启了。
+                 *   详见 docs/连接可靠性排查.md §2.4 与 §11.4。
                  */
-                Log2.i(TAG, "【启动来源】系统开机");
+                Log2.i(TAG, src() + "BOOT_COMPLETED（系统开机）");
                 break;
 
             case "android.bluetooth.device.action.ACL_CONNECTED": {
@@ -70,7 +92,7 @@ public class BootReceiver extends BroadcastReceiver {
                     return;
                 }
 
-                Log2.i(TAG, "【启动来源】蓝牙 ACL_CONNECTED ← " + name + " / " + addr);
+                Log2.i(TAG, src() + "蓝牙 ACL_CONNECTED ← " + name + " / " + addr);
                 dumpKnownDevices(context);
                 /*
                  * ★ 这里什么都不做，只记日志和白名单。
@@ -121,8 +143,9 @@ public class BootReceiver extends BroadcastReceiver {
                 int state = intent.getIntExtra(
                         android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1);
                 if (state == android.bluetooth.BluetoothAdapter.STATE_ON) {
-                    // 只记日志：蓝牙刚打开时车机还没连，探测没有意义
-                    Log2.i(TAG, "【启动来源】蓝牙已开启");
+                    // 只记日志：蓝牙刚打开时车机还没连，探测没有意义。
+                    // 这不是"唤醒来源"（蓝牙开关变化本来就是个普通事件）
+                    Log2.i(TAG, "【事件】蓝牙已开启");
                 }
                 break;
             }
@@ -149,13 +172,41 @@ public class BootReceiver extends BroadcastReceiver {
             case "android.intent.action.MY_PACKAGE_REPLACED": {
                 // 只监听自己的升级（不需要 data scheme，也不会被别的应用打扰）
                 // 只记日志：进程会被这条广播拉起，SyncGlanceApp.onCreate 会补一次探测
-                Log2.i(TAG, "【启动来源】本应用安装/升级完成");
+                Log2.i(TAG, src() + "MY_PACKAGE_REPLACED（本应用安装/升级完成）");
                 break;
             }
 
             default:
                 break;
         }
+    }
+
+    /**
+     * 这条广播到达时，进程是不是**刚被它从零拉起**。
+     *
+     * <p>判据：{@code Application.onCreate} 记下的进程启动时刻到现在的差值。
+     * 阈值 1500ms —— 正常情况 {@code onCreate} 一返回就会派发广播（几十~几百毫秒）；
+     * 「进程早就活着」时差值通常是秒级到分钟级。</p>
+     *
+     * <p>为什么值得区分：2026-11-22 排查「假 BOOT_COMPLETED」时，最需要的就是
+     * 「这次到底是进程被重新拉起，还是本来就在跑」，当时只能靠 uptime /
+     * system_server ETIME 绕出来。</p>
+     */
+    private static boolean isColdStart() {
+        long t0 = com.xigaigai.syncglance.SyncGlanceApp.processStartAtMs();
+        if (t0 <= 0) return false;                       // 没记上，保守当作"已在运行"
+        return android.os.SystemClock.elapsedRealtime() - t0 < 1500;
+    }
+
+    /**
+     * 日志前缀。
+     *
+     * <p>不用「启动来源」这个词了（2026-11-22）：本类**一个 start 都没调**，
+     * 说「来源」会让人误以为连接是这里发起的。真正的拉起方是
+     * {@link SdlReceiver} 里库的 {@code SdlBroadcastReceiver.onReceive}。</p>
+     */
+    private static String src() {
+        return isColdStart() ? "【进程被拉起】" : "【进程已运行】收到 ";
     }
 
     /** 安全获取蓝牙设备名（可能因权限或未缓存返回 null） */
