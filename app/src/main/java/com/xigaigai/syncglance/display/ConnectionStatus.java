@@ -1,76 +1,123 @@
 package com.xigaigai.syncglance.display;
 
 /**
- * 车机连接状态 → 通知栏里的那一句话。
+ * 车机连接状态 → 通知栏正文那一句。
  *
- * <h3>为什么要单独一个类</h3>
- * 通知文案以前散在 {@code SdlService.notificationText()} 里，还顺手把歌名、导航指令
- * 拼了进去。那两个东西每秒都可能变，一旦挂到通知上，通知栏就会不停刷新 ——
- * 既费电又吵。所以这里只保留**状态枚举**：
+ * <h3>文案风格（2026-11-22 定稿）</h3>
+ * 对齐 SDL 官方截图里的写法：
  *
  * <pre>
- *   未连接（蓝牙未连接）          RouterService 没在跑 —— 根因就是车机蓝牙没连上
- *   未连接（Router 服务运行中）    Router 在监听 RFCOMM，等车机来连
- *   未连接（连接关闭）            这次连上过，现在断了
- *   已连接（未选中/后台/受限）    HMI 不是 FULL，车机上其实什么都没显示
- *   已连接（正在注册）            传输层通了，车机还没回第一条 OnHMIStatus
- *   已连接（空闲/歌曲/导航/歌曲·导航）   FULL，且能说清正在显示什么
+ *   Connected through SDL (FULL: PLY/NAV)     ← 已连，括号里是「HMI 等级: 车机界面内容」
+ *   Connecting through SDL (Registering)      ← 连接中，括号里是卡在哪一步
+ *   Waiting for connection (Router listening) ← 未连，括号里是当前状态
+ *   Connection closed                         ← 连过又断了
  * </pre>
  *
- * 纯逻辑，不碰 Android —— 可以单测。调用方见 {@code SdlService#notificationText()}。
+ * <h3>为什么只放状态枚举，不放歌名</h3>
+ * 歌名/歌词/坐标每秒都可能变，挂到通知上就会不停刷新（费电又吵）。
+ * 这里只有「HMI 等级」（4 种）× 「界面内容」（4 种）加几个连接阶段，
+ * 变化频率极低。
+ *
+ * <h3>参数从哪来</h3>
+ * <ul>
+ *   <li>{@code hmi} / {@code content} —— {@code SyncLifecycle} 与 {@code StateRenderer}</li>
+ *   <li>{@code routerAlive} —— {@code SdlRouterService} 跨进程广播上报</li>
+ *   <li>{@code closedOnce} —— 本次进程起来后是否「连上过又断了」</li>
+ *   <li>{@code managerStarted} —— {@code SdlManagerListener.onStart} 是否回调
+ *       （= RAI 注册成功）</li>
+ *   <li>{@code retryPending} / {@code retryCount} / {@code retryMax} ——
+ *       秒失败后的受控重试</li>
+ * </ul>
+ *
+ * 纯逻辑，不碰 Android —— 可单测。
  */
 public final class ConnectionStatus {
 
     private ConnectionStatus() { }
 
     /**
-     * @param hmi         生命周期状态；null 视作 {@code DISCONNECTED}
-     * @param routerAlive RouterService 是否在跑（由 {@code SdlRouterService} 广播上报）
-     * @param closedOnce  本次启动后是否"连上过又断开了"
-     * @param content     FULL 时车机上显示的内容，可为 null
-     * @return 通知正文，例如「未连接（蓝牙未连接）」「已连接（歌曲）」
+     * @param hmi          生命周期状态；null 视作 {@code DISCONNECTED}
+     * @param content      FULL 时车机上显示的内容，可为 null
+     * @param routerAlive  RouterService 是否在跑
+     * @param closedOnce   本次启动后是否「连上过又断开了」
+     * @param managerStarted RAI 是否注册成功（{@code SdlManagerListener.onStart} 已回调）
+     * @param retryPending 是否正在等「秒失败」的延迟重试
+     * @param retryCount   已重试次数（第几次，从 1 开始）
+     * @param retryMax     最多重试次数
+     * @return 通知正文，例如「Connected through SDL (FULL: PLY)」
      */
     public static String text(SyncLifecycle.State hmi,
+                              StateRenderer.State content,
                               boolean routerAlive,
                               boolean closedOnce,
-                              StateRenderer.State content) {
+                              boolean managerStarted,
+                              boolean retryPending,
+                              int retryCount,
+                              int retryMax) {
+
+        /*
+         * ① 秒失败重试等待中 —— **必须最先判**。
+         *
+         *   秒失败时 handleConnectionClosed() 已经调用 lifecycle.onProxyClosed()，
+         *   所以此刻 hmi 是 DISCONNECTED。不特判的话会错显示成
+         *   「Waiting for connection (...)」，而实际上我们正在主动重连。
+         */
+        if (retryPending) {
+            return "Connecting through SDL (Retrying " + retryCount + "/" + retryMax + ")";
+        }
+
         SyncLifecycle.State s = (hmi == null) ? SyncLifecycle.State.DISCONNECTED : hmi;
 
         switch (s) {
             case CONNECTING:
-                // 传输层已经通了，只是车机还没回第一条 OnHMIStatus
-                return "已连接（正在注册）";
+                /*
+                 * proxy 已经建好，但车机还没告诉我们该处于哪个 HMI 等级。
+                 * 三种卡点，按「先远后近」排列：
+                 */
+                if (managerStarted) {
+                    // RAI 成功 → 传输和注册都通了，只差车机下发 OnHMIStatus
+                    return "Connecting through SDL (Waiting for head unit)";
+                }
+                // RAI 还没成功：Router 起来了说明正在绑传输/注册，没起来就是在等 Router
+                return routerAlive
+                        ? "Connecting through SDL (Registering)"
+                        : "Connecting through SDL (Waiting for Router)";
+
             case NONE:
-                return "已连接（未选中）";
             case BACKGROUND:
-                return "已连接（后台）";
             case LIMITED:
-                return "已连接（受限）";
             case FULL:
-                return "已连接（" + contentLabel(content) + "）";
+                // 已连接：括号里是「HMI 等级: 车机界面内容」
+                return "Connected through SDL (" + s.name() + ": " + contentLabel(content) + ")";
+
             case DISCONNECTED:
             default:
-                /*
-                 * 三种"未连接"的区分：
-                 *   连过又断   → 连接关闭（最可能是车机熄火 / 蓝牙断开）
-                 *   Router 在跑 → 正在监听，等车机主动连
-                 *   Router 没跑 → 蓝牙压根没连上（Router 由 ACL_CONNECTED 触发，
-                 *                没有蓝牙链路就不会起来）。这是**常态**，不是故障。
-                 */
-                if (closedOnce) return "未连接（连接关闭）";
-                return routerAlive ? "未连接（Router 服务运行中）" : "未连接（蓝牙未连接）";
+                if (closedOnce) {
+                    // 连上过又断了（熄火 / 蓝牙断）。服务随即 stopSelf，实际几乎看不到
+                    return "Connection closed";
+                }
+                return routerAlive
+                        // Router 在注册 SDP、监听 RFCOMM，等车机来连
+                        ? "Waiting for connection (Router listening)"
+                        // Router 都没起来 ⇒ 蓝牙链路本身没通
+                        : "Waiting for connection (Bluetooth not connected)";
         }
     }
 
-    /** FULL 时车机上显示的四种内容 */
+    /**
+     * 车机界面上正在显示什么（4 种）。
+     *
+     * <p>判定见 {@code StateRenderer#currentState()}：导航用 {@code isFresh()}
+     * 而不是 {@code hasData()} —— 高德闪退/导航结束后数据会「过期」但不清空。</p>
+     */
     private static String contentLabel(StateRenderer.State content) {
-        if (content == null) return "空闲";
+        if (content == null) return "IDLE";
         switch (content) {
-            case C_MUSIC_ONLY: return "歌曲";
-            case B_NAV_ONLY:   return "导航";
-            case D_BOTH:       return "歌曲·导航";
+            case C_MUSIC_ONLY: return "PLY";
+            case B_NAV_ONLY:   return "NAV";
+            case D_BOTH:       return "PLY/NAV";
             case A_EMPTY:
-            default:           return "空闲";
+            default:           return "IDLE";
         }
     }
 }

@@ -1,5 +1,8 @@
 package com.xigaigai.syncglance.service;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -54,6 +57,8 @@ public class SdlService extends Service {
      *   改成 SyncPlay 之后语义唯一。
      */
     private static final String TAG = "SyncPlay";
+    private static final String CHANNEL_ID = "syncglance";
+    private static final int NOTIF_ID = 1;
 
     /**
      * 车机上显示的应用名 —— 也是车机策略表里认应用的<b>唯一标识</b>。
@@ -164,9 +169,11 @@ public class SdlService extends Service {
         com.xigaigai.syncglance.core.SyncPlayCore core =
                 com.xigaigai.syncglance.core.SyncPlayCore.get();
         core.init(this);
+        core.setOnDataChanged(this::updateNotification);
         renderer = core.renderer();
         lifecycle = core.lifecycle();
 
+        createChannel();
         registerRouterWatcher();
 
         Log2.i(TAG, "SyncPlay 服务创建（连接层）");
@@ -191,6 +198,22 @@ public class SdlService extends Service {
 
     /** 秒失败重试计数（只在「建连 <500ms 且零 HMI 报文」时递增） */
     private int fastFailRetryCount = 0;
+
+    /**
+     * 是否正在等「秒失败」的延迟重试。
+     *
+     * <p>为什么要单独一个标记：秒失败时 {@code handleConnectionClosed()} 已经调用
+     * {@code lifecycle.onProxyClosed()}，此刻状态是 {@code DISCONNECTED}。
+     * 单看状态会错显示成「Waiting for connection」，实际上我们正在主动重连。</p>
+     */
+    private volatile boolean retryPending = false;
+
+    /**
+     * RAI 是否注册成功（{@code SdlManagerListener.onStart} 已回调）。
+     *
+     * 用途：{@code CONNECTING} 期间区分「还没注册完」和「注册完了等车机下发 HMI 等级」。
+     */
+    private volatile boolean managerStarted = false;
 
     private final Handler retryHandler = new Handler(Looper.getMainLooper());
 
@@ -256,6 +279,7 @@ public class SdlService extends Service {
                 if (alive == routerAlive) return;
                 routerAlive = alive;
                 Log2.i(TAG, "RouterService " + (alive ? "已启动" : "已退出"));
+                updateNotification();      // 通知正文里的 Router 状态跟着变
             }
         };
         android.content.IntentFilter f = new android.content.IntentFilter();
@@ -321,6 +345,17 @@ public class SdlService extends Service {
      */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        /*
+         * ★ 第一件事就进前台。
+         *
+         *   SdlReceiver 用 startForegroundService 启动本服务，Android 要求
+         *   5 秒内必须调 startForeground()，否则抛
+         *   `did not then call Service.startForeground()` 并杀服务。
+         */
+        startAsForeground();
+        isForeground = true;
+        updateNotification();
+
         boolean forceReset = intent != null
                 && intent.getBooleanExtra(EXTRA_FORCE_RESET, false);
 
@@ -382,11 +417,14 @@ public class SdlService extends Service {
         instance = null;
 
         /*
-         * ★ 2026-11-22：原本这里有一段 stopForeground(STOP_FOREGROUND_REMOVE)
-         *   （官方 Integration Basics 的「Exiting the Foreground」要求）。
-         *   本服务已不再进前台、也不持有通知，故整段移除。
-         *   恢复方法见 docs/通知移除与存活权衡.md。
+         * 官方 Integration Basics - Java「Exiting the Foreground」：
+         * "don't leave your notification in the notification tray" —— 退出前台并移除通知。
+         * **不删通知渠道**：渠道是用户可见的设置项（重要性可能被用户调过），删了下次要重建。
          */
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } catch (Exception ignored) { }
+        isForeground = false;
 
         // 服务退出前把日志缓冲刷到文件。
         // 连接类问题最关键的证据往往就是"最后几秒"，攒批写可能会漏掉它们。
@@ -399,25 +437,123 @@ public class SdlService extends Service {
     public IBinder onBind(Intent intent) { return null; }
 
     /*
-     * ★ 2026-11-22：整块「前台服务 + 常驻状态通知」已移除。
+     * ⚠ 2026-11-22 变更史（重要，别再走一遍弯路）
      *
-     *   本服务现在**不是前台服务**，不再持有任何通知。理由与代价、以及
-     *   完整的恢复步骤见 docs/通知移除与存活权衡.md。
+     *   ① 白天：用户嫌通知栏两条重复，要求去掉我们这条 → 本服务降级为普通后台服务，
+     *      SdlReceiver 改用 startService。文档见 docs/通知移除与存活权衡.md。
+     *   ② 同日晚：查清「两条通知」是 SDL 的固有设计（SDL-0309 提案原文：
+     *      router service 一条 + 每个 SDL app 自己的 manager service 各一条，
+     *      且开发者无法影响、官方提案想加开关但被 Rejected），用户决定恢复。
+     *   ③ 现在：恢复前台服务 + 常驻通知，**但换了文案风格**（对齐官方截图）：
+     *      标题用应用名，正文是 `Connected through SDL (HMI: 内容)`，
+     *      小图标用 SDL 的 sdl_tray_icon，**不设大图标**。
      *
-     *   一句话：通知栏那条 SDL 通知（RouterService 的）已经够用了，我们这条
-     *   在「等待车机」时是重复信息。代价是本进程失去前台保护，后台存活
-     *   要依赖 Router 进程的唤醒链路 + 系统电池策略（见文档）。
-     *
-     *   ⚠ 改回前台时必须同时改三处，缺一处会崩 or 不生效：
-     *     ① 这里恢复 startForeground / 通知构造；
-     *     ② onStartCommand 里恢复 startAsForeground()；
-     *     ③ SdlReceiver.startSelf() 把 startService 改回 startForegroundService。
+     *   改回普通服务时必须同时改三处，缺一处会崩：
+     *     ① 这里删掉 startForeground / 通知构造；
+     *     ② onStartCommand 里删掉 startAsForeground()；
+     *     ③ SdlReceiver.startSelf() 把 startForegroundService 改回 startService。
      */
+
+    // ---------------- 前台服务 ----------------
+
+    private void createChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm == null) return;
+            // 渠道可能被用户调过重要性，已存在就不要覆盖用户的选择
+            if (nm.getNotificationChannel(CHANNEL_ID) != null) return;
+            NotificationChannel ch = new NotificationChannel(
+                    CHANNEL_ID, "SyncPlay 连接状态", NotificationManager.IMPORTANCE_LOW);
+            ch.setShowBadge(false);
+            nm.createNotificationChannel(ch);
+        }
+    }
+
+    /** 启动/刷新前台通知 */
+    private void startAsForeground() {
+        startForeground(NOTIF_ID, buildNotification());
+    }
+
+    /**
+     * 构造通知。
+     *
+     * <h3>样式对齐官方截图</h3>
+     * SDL 官方 App 自己那条长这样：
+     * <pre>
+     *   [小图标]  Connected through SDL
+     * </pre>
+     * 所以这里：标题用应用名，正文是状态，**只有小图标、不设大图标**
+     * （大图标是 Router 那条才有的绿色六边形，我们不要）。
+     */
+    private Notification buildNotification() {
+        Notification.Builder b = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                ? new Notification.Builder(this, CHANNEL_ID)
+                : new Notification.Builder(this);
+
+        b.setContentTitle(getString(com.xigaigai.syncglance.R.string.app_name))
+         .setContentText(notificationText())
+         .setSmallIcon(com.xigaigai.syncglance.R.drawable.sdl_tray_icon)
+         .setOngoing(true)
+         .setShowWhen(false)
+         .setOnlyAlertOnce(true);      // 状态刷新也不响铃、不闪
+
+        try {
+            Intent i = new Intent(this, com.xigaigai.syncglance.activity.MainActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                    ? android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                      | android.app.PendingIntent.FLAG_IMMUTABLE
+                    : android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+            b.setContentIntent(android.app.PendingIntent.getActivity(this, 0, i, flags));
+        } catch (Exception ignored) { }
+
+        return b.build();
+    }
+
+    /** 通知正文（纯逻辑在 {@link com.xigaigai.syncglance.display.ConnectionStatus}） */
+    private String notificationText() {
+        return com.xigaigai.syncglance.display.ConnectionStatus.text(
+                lifecycle == null ? null : lifecycle.getState(),
+                renderer == null ? null : renderer.currentState(),
+                routerAlive,
+                closedOnce,
+                managerStarted,
+                retryPending,
+                fastFailRetryCount,
+                FAST_FAIL_MAX_RETRY);
+    }
+
+    /** 上次推送的正文。内容没变就不重发，省电。 */
+    private String lastNotifText;
+
+    /** 状态变化时刷新通知。 */
+    public void updateNotification() {
+        try {
+            // 还没进前台（onCreate 早于 onStartCommand）时不能 notify，直接跳过；
+            // 进前台由 onStartCommand 负责，它一定会调 startAsForeground()。
+            if (!isForeground) return;
+
+            String text = notificationText();
+            if (text.equals(lastNotifText)) return;
+            lastNotifText = text;
+
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.notify(NOTIF_ID, buildNotification());
+        } catch (Exception e) {
+            Log2.w(TAG, "刷新通知失败: " + e.getMessage());
+        }
+    }
+
+    /** 是否已经调过 startForeground */
+    private boolean isForeground = false;
 
     // ---------------- 连接 ----------------
 
     public void startProxy() {
         if (sdlManager != null) return;
+        // 新一轮建连：注册标记和重试标记都归零
+        managerStarted = false;
+        retryPending = false;
         try {
             /*
              * ★ 打开 SDL 内部日志（仅 debug 包，与官方 hello_sdl 一致）。
@@ -958,6 +1094,7 @@ public class SdlService extends Service {
                 lifecycle.canSendRpc());
 
         closedOnce = false;        // 又连上了，"连接关闭"作废
+        updateNotification();      // 通知正文跟着 HMI 等级走
 
         // 通知渲染器：连上/断开了都要重新评估能不能画
         renderer.onLifecycleChanged();
@@ -1213,6 +1350,8 @@ public class SdlService extends Service {
             public void onStart() {
                 if (gen != generation) return;
                 Log2.i(TAG, "✓ SdlManager onStart —— 已注册完成，等待车机下发 HMI 状态");
+                managerStarted = true;
+                updateNotification();
                 /*
                  * ★ 注册一完成就把车机能力清单 dump 出来。
                  *
@@ -1316,6 +1455,8 @@ public class SdlService extends Service {
             com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(false);
             renderer.onDisconnected();
             com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
+            retryPending = true;
+            updateNotification();
             retryHandler.postDelayed(this::startProxy, FAST_FAIL_RETRY_DELAY_MS);
             return;
         }
@@ -1345,6 +1486,8 @@ public class SdlService extends Service {
         renderer.onDisconnected();
         com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
 
+        // 断开瞬间刷成「Connection closed」，随后 stopSelf 会连通知一起收走
+        updateNotification();
         stopSelf();          // ★ 官方语义：断开就退出，等广播链路重新拉起
     }
 }

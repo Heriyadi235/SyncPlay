@@ -6,6 +6,7 @@ import android.os.Build;
 
 import com.smartdevicelink.transport.SdlBroadcastReceiver;
 import com.smartdevicelink.transport.TransportConstants;
+import com.smartdevicelink.util.AndroidTools;
 import com.xigaigai.syncglance.service.SdlService;
 import com.xigaigai.syncglance.util.Log2;
 
@@ -106,11 +107,31 @@ public class SdlReceiver extends SdlBroadcastReceiver {
         wakeRouter(context);
 
         /*
-         * ★ 2026-11-22：原本这里有一段 Android 14+ 的前台服务类型权限检查
-         *   （AndroidTools.hasForegroundServiceTypePermission），因为当时是用
-         *   startForegroundService 拉起 SdlService。现在 SdlService 已不是前台服务
-         *   （通知已移除，见 docs/通知移除与存活权衡.md），这条检查随之删除。
+         * ★ 官方 Must（Android 14 / API 34 及以上）：先检查有没有
+         *   connectedDevice 类型的前台服务权限，没有就**直接放弃启动**。
+         *
+         *   官方示例：
+         *     if (!AndroidTools.hasForegroundServiceTypePermission(context)) { ... return; }
+         *
+         *   API 34 起，启动带 connectedDevice 类型的 FGS 必须有「已连接的设备」
+         *   或对应权限，否则 startForegroundService 抛
+         *   ForegroundServiceStartNotAllowedException。不预先检查的话异常会被
+         *   catch 吞掉，服务起不来，车机侧表现为「正在连接」直到超时。
+         *
+         *   本机是 Android 15（API 35），早在这条规则的适用范围内。
          */
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                if (!AndroidTools.hasForegroundServiceTypePermission(context)) {
+                    Log2.w(TAG, "缺少 connectedDevice 前台服务权限，按官方要求放弃启动 SdlService");
+                    return;
+                }
+            } catch (Throwable t) {
+                // 检查本身出问题不能挡住启动，记一笔继续
+                Log2.w(TAG, "检查前台服务类型权限时异常: "
+                        + t.getClass().getSimpleName() + " " + t.getMessage());
+            }
+        }
 
         startSelf(context, intent);
     }
@@ -118,28 +139,25 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     /**
      * 拉起 SdlService。
      *
-     * <h3>★ 2026-11-22 起改用 {@code startService}</h3>
-     *
-     * 原来这里是 {@code startForegroundService}：那个 API 的契约是
-     * <b>5 秒内必须调用 {@code startForeground()}，否则抛
-     * {@code Context.startForegroundService() did not then call Service.startForeground()}</b>
-     * —— 直接崩服务。
-     *
-     * <p>现在 SdlService 不再持有通知（见 {@code docs/通知移除与存活权衡.md}），
-     * 所以必须换成 {@code startService}，否则一唤醒就崩。</p>
+     * <h3>为什么用 {@code startForegroundService}</h3>
+     * `SdlService` 是**前台服务**（通知见 {@code docs/通知移除与存活权衡.md}）。
+     * `startForegroundService` 的契约是「5 秒内必须 `startForeground()`」，
+     * 本服务在 {@code onStartCommand}` 第一行就进前台，满足契约。
      *
      * <h3>为什么后台启动不会被拦</h3>
-     * Android 8+ 限制的是「后台应用启动服务」，而这条路径满足两点：
+     * Android 8+ 限制「后台应用启动服务」、12+ 限制「后台启动前台服务」，
+     * 而这条路径满足三点：
      * <ul>
-     *   <li>本广播来自<b>同 uid 的 Router 进程</b>，而它正跑着前台服务
+     *   <li>本广播来自<b>同 uid 的 Router 进程</b>，它正跑着前台服务
      *       （{@code com.smartdevicelink.router}）—— 整个 uid 处于
      *       foreground-service 状态，不受后台启动限制；</li>
-     *   <li>即便进程是从零被拉起，receiver 执行期间 App 在临时白名单里。</li>
+     *   <li>即便进程是从零被拉起，receiver 执行期间 App 在临时白名单里；</li>
+     *   <li>API 34+ 的 `connectedDevice` 类型前置条件在 {@link #onSdlEnabled} 里先查过。</li>
      * </ul>
      *
-     * <p>万一某些 ROM 仍然拦了，会抛 {@code IllegalStateException}。这里
-     * <b>不静默吞掉</b>：打 ERROR 级日志 + 完整堆栈，方便在 LogActivity 里
-     * 一眼看出「是不是该回退到前台通知方案了」。</p>
+     * <p>万一仍被拦，会抛 {@code IllegalStateException} /
+     * {@code ForegroundServiceStartNotAllowedException}。这里**不静默吞掉**：
+     * 打 ERROR 级日志 + 完整堆栈，便于一眼看出该不该回退。</p>
      */
     private void startSelf(Context context, Intent intent) {
         try {
@@ -149,12 +167,15 @@ public class SdlReceiver extends SdlBroadcastReceiver {
                 i.putExtras(intent);
                 i.setAction(intent.getAction());
             }
-            context.startService(i);
-            Log2.i(TAG, "已直接启动 SdlService（startService，非前台）");
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(i);
+            } else {
+                context.startService(i);
+            }
+            Log2.i(TAG, "已直接启动 SdlService（startForegroundService）");
         } catch (Exception e) {
-            Log2.e(TAG, "★ 启动 SdlService 失败（若为 IllegalStateException，"
-                    + "说明系统拦了后台服务启动，需回退前台通知方案，"
-                    + "见 docs/通知移除与存活权衡.md）", e);
+            Log2.e(TAG, "★ 启动 SdlService 失败（若为 ForegroundServiceStartNotAllowed，"
+                    + "说明系统拦了后台启动前台服务，见 docs/通知移除与存活权衡.md）", e);
         }
     }
 
