@@ -179,9 +179,16 @@ public class StateRenderer {
     /** 软键 ID：第 1 格固定 9001，依次 +1（计时键 = 9003） */
     public static final int SOFT_BUTTON_ID = 9001;
 
-    /** 需要高亮的软键下标：计时激活时高亮「计时」格，否则不高亮 */
+    /**
+     * 需要高亮的软键下标。
+     *
+     * ★ 判据：**时钟格此刻显示的是不是计时器时间**（用户 2026-11-21 明确要求）。
+     *   不再单独看 {@code timerActive} —— 那个标记只能说明"用户设过计时器"，
+     *   但真正该高亮的语义是"你在那一格看到的是计时器"。
+     *   两者现在由同一个入口 {@link #isTimerOccupyingClock()} 表达，避免将来再次分叉。
+     */
     private int highlightIndex() {
-        if (!timerActive) return -1;
+        if (!isTimerOccupyingClock()) return -1;
         return softKeyCount > TIMER_KEY_INDEX ? TIMER_KEY_INDEX : -1;
     }
 
@@ -992,7 +999,11 @@ public class StateRenderer {
          *   于是点「正计时/倒计时/暂停/清零」时，只有 RPC 发了出去（车机正常），
          *   而 lastFrame 不重建 —— LogActivity 里的屏幕预览拿到的还是旧帧，
          *   计时器那一格完全不动（有歌在播时才碰巧对，因为播放位置心跳会顺带刷新）。
+         *
+         * ★ 同时清掉投递指纹：用户主动改了计时状态，必须重新投一次。
+         *   否则「暂停 → 继续 → 在同一秒内又暂停」会被节流判成"读数没变"而漏发。
          */
+        timerClockKey = null;
         markDirty("timerState");
     }
 
@@ -1014,6 +1025,101 @@ public class StateRenderer {
             return Math.max(0, total - elapsed);
         }
         return elapsed;
+    }
+
+    /**
+     * 用户计时器此刻是否「接管」时钟格（含暂停态）。
+     *
+     * <p>这是软键高亮、时钟格优先级的<b>唯一判据</b>：
+     * 只要时钟格显示的是计时器读数，就算接管 —— 不管它在跑还是暂停。</p>
+     */
+    public boolean isTimerOccupyingClock() {
+        return timerActive;
+    }
+
+    /**
+     * 按<b>本地记录的状态</b>重算「现在该让车机显示什么」—— 供跨失焦/重连后补发。
+     *
+     * <h3>为什么需要这个方法</h3>
+     * 掉出 HMI_FULL 时车机会把计时器扔掉（它的定时器跟着 HMI 生命周期）。
+     * 而我们本地一直记着状态：起始值 {@code timerH/M/S}、方向 {@code timerCountdown}、
+     * 起点 {@code timerStartMillis}、暂停时刻 {@code timerPausedAt}。
+     * 回到 FULL 后按这些重算一遍再投射，就能做到「跨焦点存活」。
+     *
+     * <h3>返回值的三种含义</h3>
+     * <ul>
+     *   <li>{@code null} —— 没有计时器要显示，调用方继续走 ETA / 播放时间</li>
+     *   <li>空列表 —— 有计时器但刚刚到期被清掉了，调用方也继续往下走</li>
+     *   <li>非空列表 —— 计时器接管，直接发这些指令</li>
+     * </ul>
+     *
+     * <h3>倒计时到期</h3>
+     * 需求：倒计时在失焦期间走完 → 回来就不用管了，按「已清除」处理，
+     * 时钟格切回 ETA / 播放时间（见用户 2026-11-21 的决定）。
+     */
+    private java.util.List<SetMediaClockTimer> timerClockList() {
+        if (!timerActive) {
+            timerClockKey = null;
+            return null;
+        }
+
+        long v = timerElapsedSeconds();
+
+        // 倒计时走完了：清掉本地状态，让时钟格回落
+        if (timerCountdown && v <= 0) {
+            Log2.i(TAG, "倒计时已结束（失焦期间走完），自动清除");
+            clearTimerState();
+            return new java.util.ArrayList<>(0);
+        }
+
+        /*
+         * 节流：同一个「读数 + 跑/停」状态只投递一次。
+         *
+         * 为什么按"读数"而不是按"起始值"：掉出 FULL 再回来时，读数已经往前走过了，
+         * 必须按新读数重投一次；而没离开过的时候读数不变，就不该重复发。
+         *
+         * 粒度是秒 —— 所以只有在真正需要重投（跨焦点、刚启动、刚暂停）时才会命中变化。
+         */
+        String key = v + "|" + (timerRunning ? "run" : "pause");
+        if (key.equals(timerClockKey)) {
+            return java.util.Collections.emptyList();   // 已投递过，本轮不用再发
+        }
+
+        int hh = (int) (v / 3600);
+        int mm = (int) ((v / 60) % 60);
+        int ss = (int) (v % 60);
+
+        java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(2);
+        if (timerRunning) {
+            // 在跑：COUNTUP 从当前读数起表，车机会接着走
+            out.add(SetMediaClockTimer.countUpFromStartTime(
+                    clockStart(hh, mm, ss), null, AudioStreamingIndicator.PLAY));
+            Log2.i(TAG, "投递计时器（走表）: " + hh + ":" + mm + ":" + ss);
+        } else {
+            /*
+             * 暂停：必须两步（先 COUNTUP 起表，再 PAUSE 停住）。
+             * 绝不能发一条「PAUSE + startTime」—— 车机会忽略时间参数。
+             */
+            SetMediaClockTimer[] pair = freezeClockRpc(hh, mm, ss);
+            out.add(pair[0]);
+            out.add(pair[1]);
+            Log2.i(TAG, "投递计时器（暂停定格）: " + hh + ":" + mm + ":" + ss);
+        }
+        timerClockKey = key;
+        return out;
+    }
+
+    /** 上一次投递给车机的计时器状态指纹：{@code "读数|run/pause"} */
+    private volatile String timerClockKey = null;
+
+    /** 清掉用户计时器的全部本地状态 */
+    private void clearTimerState() {
+        timerActive = false;
+        timerRunning = false;
+        timerStartMillis = 0;
+        timerPausedAt = 0;
+        timerClockKey = null;
+        markDirty("timerAutoClear");
     }
 
     /**
@@ -1137,8 +1243,29 @@ public class StateRenderer {
     public java.util.List<SetMediaClockTimer> songClockRpcList() {
         java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(2);
 
-        if (timerRunning) return out;
         if (sender == null) return out;
+
+        /*
+         * ① 用户计时器 —— **永远优先于 ETA 和播放时间**（用户 2026-11-21 确认）。
+         *
+         *   ★ 以前这里写的是 `if (timerRunning) return out;`，只挡住了"在跑"的计时器；
+         *     暂停态（timerActive=true, timerRunning=false）会穿透到下面的 ETA 分支，
+         *     于是导航一开始，暂停中的计时器就被到达时刻覆盖 —— 而 timerActive 仍是 true，
+         *     再点一下计时键又会因为"暂停中"被判定为要清零，时间整个消失。
+         *     这就是「导航覆盖计时器 + 再点消失」两个现象的共同根因。
+         *
+         *   现在按 timerActive 判断，并且在跑/暂停都要把当前读数重投一次
+         *   （掉出 FULL 期间车机已经把它丢了，不重投就对不上）。
+         */
+        java.util.List<SetMediaClockTimer> timer = timerClockList();
+        if (timer != null) {
+            if (timer.isEmpty()) {
+                // 倒计时刚到期被清掉 → 继续往下走，让 ETA / 播放时间接管
+                Log2.i(TAG, "计时器已到期清除，时钟格回落到 ETA / 播放时间");
+            } else {
+                return timer;
+            }
+        }
 
         // 导航模式优先显示 ETA
         if (navClockText != null && !navClockText.isEmpty()) {
@@ -1346,6 +1473,22 @@ public class StateRenderer {
 
     /** 上次发给车机的时钟文本，避免重复发送 */
     private volatile String lastClockTextSent = null;
+
+    /**
+     * 清掉时钟相关的节流缓存，让下一次 {@link #songClockRpcList()} 无条件重算重发。
+     *
+     * <p>用在「回到 HMI_FULL / 重新连上」：那一刻车机那边的时钟格<b>已经被清空</b>了，
+     * 但我们这边的 ETA 没变、歌没换，普通节流会判定"不用发" ——
+     * 结果车机上那一格永远空着。</p>
+     */
+    public void invalidateClockCache() {
+        lastClockTextSent = null;
+        lastEtaSent = null;
+        lastSongKey = null;
+        songClockStarted = false;
+        // 计时器也要重投：车机那边的定时器已经随 HMI 掉级被丢弃了
+        timerClockKey = null;
+    }
 
     /** "歌名 - 歌手" 格式，给 mediaTrack 用 */
     private String songLabel() {

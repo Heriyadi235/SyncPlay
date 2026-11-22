@@ -1094,9 +1094,20 @@ public class SdlService extends Service {
      */
     private void initializeForConnection() {
         if (lifecycle.isInitialized()) {
-            // 本次连接已经初始化过（比如从 BACKGROUND 回到 FULL），不用重建
-            Log2.i(TAG, "本次连接已初始化过，跳过");
+            /*
+             * 本次连接已经初始化过（菜单/订阅都在），但那只是"连接层"的初始化。
+             *
+             * ★ 车机那边**已经把时钟格清空了** —— 掉出 FULL 时它会丢弃
+             *   SetMediaClockTimer 建立的定时器（文档 3.4.4.4：FULL/LIMITED
+             *   期间发起的操作会被车机自动终止）。所以回到 FULL 必须
+             *   重新把时钟推一遍，否则那一格永远空着。
+             *
+             *   以前这里只是 markDirty("reFULL")，结果就是：
+             *   导航中切走再切回来 → 到达时刻一直不显示（用户 2026-11-21 报告）。
+             */
+            Log2.i(TAG, "本次连接已初始化过（回到 FULL），重推时钟");
             renderer.markDirty("reFULL");
+            com.xigaigai.syncglance.core.SyncPlayCore.get().pushClockForce();
             return;
         }
         lifecycle.markInitialized();
@@ -1116,6 +1127,11 @@ public class SdlService extends Service {
         // 3.5 补发「没连车机时设过的」计时器
         //     （本地状态早已生效、预览也能看到，只差这一条 RPC）
         com.xigaigai.syncglance.core.SyncPlayCore.get().resendTimerIfPending();
+
+        // 3.6 ★ 按当前状态强制重推一次时钟
+        //     覆盖：计时器在跑/暂停（按本地记录重算读数）、倒计时已到期（自动清除）、
+        //     以及导航 ETA / 播放时间。车机那边的格子刚被清空，节流会误判"不用发"。
+        com.xigaigai.syncglance.core.SyncPlayCore.get().pushClockForce();
 
         // 4. 画初始界面
         renderer.markDirty("init");

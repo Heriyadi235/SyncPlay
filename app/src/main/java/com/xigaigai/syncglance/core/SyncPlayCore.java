@@ -302,6 +302,18 @@ public final class SyncPlayCore {
      * 发送者不在时是空操作。</p>
      */
     private void pushClock() {
+        pushClock(false);
+    }
+
+    /**
+     * @param force true = 清掉节流缓存后重算重发。
+     *              用于「回到 HMI_FULL / 重新连上」这种<b>车机那边的时钟格已经被清空</b>
+     *              的场景 —— 那时 ETA 没变、歌没换，普通节流会判定"不用发"，
+     *              结果车机上那一格永远空着。
+     */
+    private void pushClock(boolean force) {
+        if (force) renderer.invalidateClockCache();
+
         java.util.List<com.smartdevicelink.proxy.rpc.SetMediaClockTimer> list =
                 renderer.songClockRpcList();
         if (list == null || list.isEmpty()) return;
@@ -314,6 +326,21 @@ public final class SyncPlayCore {
             // 多条必须严格按序（先 COUNTUP 起表、再 PAUSE 停住），否则会停错表
             s.sendSequential(list);
         }
+    }
+
+    /**
+     * 回到 HMI_FULL / 重连后调用：按当前状态<b>强制</b>重推一次时钟。
+     *
+     * <p>覆盖三种情况：</p>
+     * <ul>
+     *   <li>计时器在跑 → 按本地记录的起始值重算读数，重投（车机那边已经丢了）</li>
+     *   <li>计时器暂停 → 两步法重投定格读数（绝不能单条 PAUSE + startTime）</li>
+     *   <li>倒计时在失焦期间走完 → 自动清除，时钟格回落 ETA / 播放时间</li>
+     * </ul>
+     */
+    public void pushClockForce() {
+        Log2.i(TAG, "强制重推时钟（回到 FULL / 重连）");
+        pushClock(true);
     }
 
     // ---------------- 数据源回调 ----------------

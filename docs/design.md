@@ -836,9 +836,13 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | **正计时清零后，不回落到播放时间** | 同上：回退分支拿到旧指令，没走到"播放时间"那条 | 回退分支改为直接返回 `none()`；播放时间分支条件放宽成"只要有歌数据" |
 | **倒计时 5 分暂停，显示 00:10 而不是 04:50** | `setTimerState()` 在方法最前面无条件写 `timerH/M/S` 和 `timerCountdown`，点「暂停」时传的是 `(0,0,0,"PAUSE")`，起始值和方向都被冲掉 | 只有 `COUNTUP` / `COUNTDOWN`（开始）才允许重置方向与起始值；`PAUSE` 只停止走秒 |
 
-**track 行的 `§` 指示符**：`§`（U+00A7）**只在用户计时器占用时钟格时**出现在 track
-内容前面；其他状态（导航 / 歌曲）一概不加 —— 车机字库只对 Latin-1 那批符号有字形，
-箭头 / 三角 / 播放符一律渲染成圆点（见 AGENTS.md 6.8）。
+**track 行的状态指示符：已移除**（2026-11-21）。
+
+最初用 `§`（U+00A7）在 track 前标记"时钟格当前是计时器"，后来软键第 3 格的
+**高亮**已经表达了同一件事，两个信号重复还白占 track 的 8 字符宽度，故删除。
+
+> 不要再加回来：车机字库只对 Latin-1 那批符号有字形，箭头 / 三角 / 播放符
+> 一律渲染成圆点（见 AGENTS.md 6.8）。
 
 #### 5.10.2 底栏软键：三格 + 计时键
 
@@ -866,12 +870,54 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 判定依据是 `StateRenderer.isTimerActive()` / `isTimerRunning()`，
 所以它同样能管住倒计时（先开机 5 分钟倒计时，按这个键也是"先暂停、再清零"）。
 
-**高亮**：用 SDL 的 `SoftButton.setIsHighlighted(true)`。规则是
-**「计时激活时高亮第 3 格，清零后取消」**（`ScreenFrame.highlightIndex` 承载，
-预览里画成琥珀色）。`stamp()` 里也包含了下标，否则高亮变了不会重发 `Show`。
+**高亮**：用 SDL 的 `SoftButton.setIsHighlighted(true)`。
+
+> **判据（用户 2026-11-21 明确）**：高亮**完全取决于「媒体时钟格此刻显示的是不是计时器时间」**
+> —— 由 `StateRenderer.isTimerOccupyingClock()` 单一入口表达，不另外看
+> `timerActive` 之类的旁路标志，避免两套判据再次分叉。
+> `ScreenFrame.highlightIndex` 承载，预览里画成琥珀色；`stamp()` 里也包含下标，
+> 否则高亮变了不会重发 `Show`。
 
 > ⚠ 软键的**点击回调**只能在车机上验证（`OnButtonPress{CUSTOM_BUTTON, 9003}`），
 > 手机端预览是静态 View，点不到。
+
+#### 5.10.3 时钟格优先级与跨焦点存活
+
+**优先级（用户 2026-11-21 确认）**：
+
+```
+① 用户计时器（timerActive，含暂停态）   ← 永远优先
+② 导航 ETA
+③ 播放时间
+④ 空（发 CLEAR）
+```
+
+> 以前 `songClockRpcList()` 里写的是 `if (timerRunning) return;` —— 只挡住"在跑"的
+> 计时器，**暂停态会穿透到 ETA 分支**。后果是导航一开始，暂停中的计时器就被到达时刻
+> 覆盖；而 `timerActive` 仍是 true，再点一下计时键会因"暂停中"被判定为清零，
+> 时间整个消失。两个现象同一个根因，已改成按 `timerActive` 判断。
+
+**跨焦点存活**：掉出 HMI_FULL 时车机会丢弃定时器（文档 3.4.4.4：FULL/LIMITED 期间
+发起的操作会被自动终止），所以手机必须自己记状态。
+
+本地记录：起始值 `timerH/M/S`、方向 `timerCountdown`、起点 `timerStartMillis`、
+暂停时刻 `timerPausedAt`、`timerRunning` / `timerActive`。
+
+回到 FULL 时 `SyncPlayCore.pushClockForce()` → `StateRenderer.invalidateClockCache()`
+清掉节流缓存 → `timerClockList()` 按本地状态重算读数并重投：
+
+| 状态 | 投递 |
+|---|---|
+| 在跑 | 一条 `COUNTUP(当前读数)`，车机接着走 |
+| 暂停 | **两步**：`COUNTUP(当前读数)` + `PAUSE`（绝不能单发 PAUSE + startTime） |
+| 倒计时已走完 | 自动清除本地状态，时钟格回落 ETA / 播放时间 |
+
+> ⚠ `initializeForConnection()` 以前在 `lifecycle.isInitialized() == true` 时直接
+> `return` —— 而"从 BACKGROUND 回到 FULL"正好命中这一支，导致时钟补发根本没执行。
+> 现在两分支都会强制重推。
+
+节流：`timerClockKey`（`"读数|run/pause"`）保证同一状态只投一次；用户主动操作
+（`setTimerState`）和 `invalidateClockCache()` 会清掉它。
 
 ---
 
