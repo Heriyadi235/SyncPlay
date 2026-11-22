@@ -21,7 +21,6 @@ import androidx.core.content.ContextCompat;
 
 import com.xigaigai.syncglance.R;
 import com.xigaigai.syncglance.core.SyncPlayCore;
-import com.xigaigai.syncglance.display.CharProbe;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
 import com.xigaigai.syncglance.media.NeteaseControl;
@@ -126,32 +125,6 @@ public class MainActivity extends AppCompatActivity {
             else toast("服务未启动");
         });
         findViewById(R.id.btnOpenLog).setOnClickListener(v -> openLogScreen());
-        findViewById(R.id.btnCharTest).setOnClickListener(v -> showCharTestDialog());
-        findViewById(R.id.btnClockProbe).setOnClickListener(v -> {
-            SdlService s = SdlService.getInstance();
-            if (s == null) { toast("服务未启动（需车机连接）"); return; }
-            if (!s.isHmiFull()) { toast("还没连上车机（需要 HMI_FULL）"); return; }
-            toast("开始探测，结果看日志里的 resultCode");
-            s.probeClockRange();
-        });
-
-        /*
-         * 手动唤醒车机发现。
-         *
-         * 本车机（SYNC 1.1）不会自动发现 App，必须人在车机上点「查找移动应用」；
-         * 而 RouterService 的前台窗口只有 10~20 秒（那条带倒计时的 SDL 通知），
-         * 错过就退回后台，之后车机怎么找都找不到。
-         *
-         * 这个按钮让 Router 重新进前台、倒计时重开，用户趁这段时间去车机上查找即可。
-         */
-        findViewById(R.id.btnWakeRouter).setOnClickListener(v -> {
-            boolean ok = com.xigaigai.syncglance.receiver.SdlReceiver.wakeRouter(this);
-            if (ok) {
-                toast("已重开等待窗口（约 20 秒）—— 现在去车机上点「查找移动应用」");
-            } else {
-                toast("唤醒失败，请查看信息页日志");
-            }
-        });
 
         /*
          * ★ 不在 Activity 里建连接，只做官方探测（2026-11-21 实车修正）。
@@ -390,33 +363,6 @@ public class MainActivity extends AppCompatActivity {
                     toast(String.format(java.util.Locale.US, "倒计时 %02d:%02d", m, s));
                 })
                 .setNegativeButton("取消", null)
-                .show();
-    }
-
-    /**
-     * 字符测试：把 {@link CharProbe} 里的分组逐条发到车机。
-     *
-     * 用 {@code setSingleChoiceItems} 是为了点完<b>不关</b>对话框 ——
-     * 人可以坐在车里连着点十几组，不用每试一组就回手机重开一次。
-     *
-     * 每组内容带两位编号，车机上看到「03」后面是个圆点，就说明第 3 个字符没字形。
-     */
-    private void showCharTestDialog() {
-        SdlService s = SdlService.getInstance();
-        if (s == null) { toast("服务未启动"); return; }
-        if (!s.isHmiFull()) { toast("还没连上车机（需要 HMI_FULL）"); return; }
-
-        String[] names = new String[CharProbe.GROUPS.length];
-        for (int i = 0; i < names.length; i++) names[i] = CharProbe.GROUPS[i].name;
-
-        new AlertDialog.Builder(this)
-                .setTitle("字符测试（点一组发一次）")
-                .setSingleChoiceItems(names, -1, (d, which) -> {
-                    CharProbe.Group g = CharProbe.GROUPS[which];
-                    s.sendScrollableTest(g.body);
-                    toast("已发送：" + g.name);
-                })
-                .setPositiveButton("关闭", null)
                 .show();
     }
 
