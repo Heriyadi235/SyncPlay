@@ -132,7 +132,7 @@ sdl.router.startservice
 | 16 | Router Service 的 intent-filter `com.smartdevicelink.router.service` | **Must** | 有 | ✅ |
 | 17 | Router Service 必须在 `com.smartdevicelink.router` 进程 | **Must** | `android:process="com.smartdevicelink.router"` | ✅ |
 | 18 | `sdl_router_version` meta-data | 要求 | 有（`@integer/sdl_router_service_version_value`） | ✅ |
-| 19 | `onSdlEnabled` 里 **S 及以上用 PendingIntent** 启动 | **Must**（API 31+） | ⚠ **无法落实（库侧）**：库给的 PendingIntent 不含 component，指不到 `SdlService`；改用 `startForegroundService` | 不是"有意偏离"，是**照做也没用**，见注② |
+| 19 | `onSdlEnabled` 里 **S 及以上用 PendingIntent** 启动 | **Must**（API 31+） | ✅ **已落实（双路）**：先发 PendingIntent，再 `startSelf` 兜底；`SdlService` 已加 `sdl.router.startservice` 的 intent-filter | ✅ 2026-11-22 本机实测通过，见注② |
 | 20 | **API 34+ 要先检查 `AndroidTools.hasForegroundServiceTypePermission(context)`**，没有就 return | **Must**（API 34+） | ✅ 已恢复 | ✅ 2026-11-22 恢复前台时一并恢复 |
 | 21 | `getSdlServiceName()` 默认返回 `"SdlService"`，类名不同要覆写 | Note | 我们的类就叫 `SdlService`，默认值正确 | ✅ |
 | 22 | `MultiplexTransportConfig` 连车机 | 要求 | `new MultiplexTransportConfig(ctx, APP_ID)` | ✅ |
@@ -160,13 +160,14 @@ sdl.router.startservice
 这条二选一关系的价值在于：如果哪天又想去掉通知，必须同时去掉前台状态，
 并接受后台存活变弱（细节见 `docs/通知移除与存活权衡.md` 第六节）。
 
-### 注②：第 19 条为什么「无法落实」—— 库给的 PendingIntent 指不到我们的服务
+### 注②：第 19 条（S+ 用 PendingIntent 启动）—— 曾经"无法落实"，现已打通
 
 官方这条是 **Must**，目的是**绕开 Android 12+ 对「后台启动前台服务」的限制**：
 Router 在 `sdl.router.startservice` 广播里塞一个
 `PendingIntent.getForegroundService(...)`，App 收到后 `send()` 它来启动自己的服务。
 
-**问题：那个 PendingIntent 的目标 Intent 里没有我们的组件。**
+#### 曾经的坑（2026-11-21 ~ 11-22 白天）
+
 反编译 `sdl_android 5.8.0` 的 `SdlRouterService`（发送广播处）：
 
 ```java
@@ -177,40 +178,45 @@ PendingIntent pi = PendingIntent.getForegroundService(
 intent.putExtra("pending_intent", pi);      // 塞进广播
 ```
 
-**没有 component、没有 action。** 而我们的 `SdlService` 在 Manifest 里也没有任何
-intent-filter，只能靠显式组件启动 —— 所以这个 PendingIntent 根本指不到它。
+**没有 component、没有 action。** 当时 `SdlService` 也没有 intent-filter，
+所以 `send()` 之后 system_server 里报 `Unable to start service ... : not found`，
+但**异常不回传给发送方**，所以日志里只看到「已通过 PendingIntent 启动」却什么都没起。
 
-实测现象完全吻合（2026-11-21 日志）：
+#### 根因（2026-11-22 23:27 本机实验查明）
+
+用 `am start-foreground-service` 模拟三种 Intent 形态：
+
+| 实验 | Intent 形态 | 结果 |
+|---|---|---|
+| 1 | `act=sdl.router.startservice` + `pkg` | ❌ `Unable to start service ... **not found**` |
+| 2 | `act=com.smartdevicelink.router.service` + `pkg`（Router 真声明的那个） | ✅ 解析到 `SdlRouterService` 并拉起进程 |
+| 3 | 只有 `pkg` | ❌ 什么都没起 |
+
+→ **失败原因不是「隐式 Intent 不合法」**（`setPackage` 就够，实验 2 已证明），
+而是**「没有任何 service 声明 `sdl.router.startservice`」** ——
+那个 action 之前只挂在 `SdlReceiver` 这个 **receiver** 上。
+
+#### 修法（已落地）
+
+1. `AndroidManifest.xml`：给 `SdlService` 加 `<intent-filter>` 声明
+   `sdl.router.startservice`（receiver 与 service 的解析空间互不影响，**不冲突**）
+2. `SdlReceiver.onSdlEnabled`：恢复**双路** —— 先 `startViaPendingIntent()`，
+   再 `startSelf()` 兜底（因为 `send()` 解析失败是静默的，拿不到成功/失败）
+
+**本机实测通过**：同一条 `am start-foreground-service -a sdl.router.startservice -p <包名>`
+现在直接拉起 `SdlService`，且是前台状态：
 
 ```
-12:49:37.873  [SdlReceiver] 已通过 PendingIntent 启动 SdlService   ← send() 成功，没抛异常
-（之后始终没有 [SyncPlay] SyncPlay 服务创建）                        ← SdlService.onCreate 没执行
+ServiceRecord{... .service.SdlService}
+  isForeground=true foregroundId=1
+  foregroundNoti=Notification(channel=syncglance ... FOREGROUND_SERVICE)
 ```
 
-两种解释都指向同一结论：
+**待实车验证**：车上要看日志出现
+`已通过 PendingIntent 启动 SdlService（官方 Android 12+ 路径）` 且 `★ 进入 FULL`。
 
-| 可能 | 结果 |
-|---|---|
-| `send(ctx, 0, 广播Intent)` 的 fillIn 把 `sdl.router.startservice` 补了进去 | 启动的是**声明了该 action 的 `SdlRouterService`**，不是 `SdlService` |
-| fillIn 没补 action | 变成「只有包名的隐式服务 Intent」，Android 5+ 禁止，`startForegroundService` 应抛异常 |
-
-→ **这条 Must 在 5.8.0 这套实现上对 `SdlService` 是无效的**，不是我们挑着不做。
-
-**我们现在怎么做**：只走 `startForegroundService(SdlService)`，可行性依赖
-「同 uid 的 Router 前台服务让整个 uid 不算后台」这一事实
-（证据链见 `连接可靠性排查.md` §11.1：4 轮实测 Router 上线均早于 `onSdlEnabled`）。
-
-> ⚠ **两条诚实记账**：
-> 1. **`startForegroundService` 这条路本身已实车验证过** —— 2026-11-22 20:36~20:39
->    （通知移除**之前**那一版）四轮全部成功：
->    `已直接启动 SdlService（startForegroundService）` → `★ 进入 FULL`。
->    恢复后的版本与当时**启动路径、前台机制完全相同**（都是
->    `onStartCommand` 首行 `startForeground` + `onDestroy` 里 `stopForeground`），
->    只改了通知的文案与图标。所以没有"没上过车"这回事。
->    真正还没验的只是**新文案/新图标在车机上的观感**。
-> 2. 万一在别的机型/ROM 上被拦，**没有官方 PendingIntent 这条路可退** ——
->    届时只能考虑给 `SdlService` 加 intent-filter 让它可被 action 匹配，
->    或退回「应用侧不持有 FGS + 用户长按关通知」那套。
+> 注：`startSelf` 兜底仍然保留 —— 一是 `send()` 失败不可感知，二是别的机型/ROM
+> 万一拦了后台 FGS 启动，还有 `startForegroundService` 这条路。
 
 ### 注③：第 4 条为什么不 `deleteNotificationChannel`
 

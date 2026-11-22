@@ -816,21 +816,21 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | `SdlManager` 实例不可复用，断开后必须新建 | ✅ | 用「代际号」`generation` 忽略旧对象的迟到回调 |
 | `SdlReceiver extends SdlBroadcastReceiver`，`exported="true"`，监听 `ACL_CONNECTED` + `sdl.router.startservice` | ✅ | 缺 `sdl.router.startservice` 会让 `queryForConnectedService` 直接抛异常 |
 | `defineLocalSdlRouterClass()` 返回自己的 Router 子类 | ✅ `SdlRouterService` | |
-| **`onSdlEnabled` 启动服务要分版本** | ⚠ **无法落实（库侧）** | 官方要 Android 12+ 用 Router 递来的 PendingIntent；但那个 PendingIntent 的目标 Intent **只有 `setPackage`、没有 component**，指不到 `SdlService`。我们只能用 `startForegroundService`。详见 [场景对照](sdl生命周期-场景对照.md) 注② |
+| **`onSdlEnabled` 启动服务要分版本** | ✅ 已落实（双路） | 先发 Router 递来的 PendingIntent（`SdlService` 已加 `sdl.router.startservice` 的 intent-filter 让它可被解析），再 `startSelf` 兜底。细节与实验见 [场景对照](sdl生命周期-场景对照.md) 注② |
 
 **两处曾漏掉、2026-11-21 补齐的**：
 
 1. `SdlService` 的 `exported` 从 `false` 改 `true` —— 应用在后台时，
    Router/系统从外部启动服务需要它可以被外部访问
-2. ~~`onSdlEnabled` 补 PendingIntent 路径~~ —— **2026-11-22 已撤回**：
+2. `onSdlEnabled` 补 PendingIntent 路径 —— 官方对 Android 12+ 的 Must
 
-> Router 给的是 `PendingIntent.getForegroundService(ctx, ts, new Intent().setPackage(pkg), ...)`
-> —— 目标 Intent 里**没有 component、没有 action**，而我们的 `SdlService` 也没有
-> intent-filter，所以它根本指不到 `SdlService`。实测（2026-11-21 12:49）
-> `send()` 返回成功但 `SdlService.onCreate` 从未执行。
-> **这条官方 Must 在 5.8.0 上对我们是无效的**，不是我们挑着不做。
-> 现在只走 `startForegroundService`（依据：同 uid 的 Router 前台服务让整个 uid
-> 不算后台，见 `连接可靠性排查.md` §11.1）。
+> **2026-11-22 的曲折**：第 2 条一度被撤回（当时 `send()` 后服务起不来），
+> 后来查明根因是**没有任何 service 声明 `sdl.router.startservice`**
+> —— 那个 action 只挂在 `SdlReceiver`（receiver）上，而 `startForegroundService`
+> 只按 service 的 intent-filter 解析，于是 system_server 报 `not found`
+> （且该异常不回传给发送方）。
+> 给 `SdlService` 加上同名 intent-filter 后已打通，本机实测通过；
+> 现在保留**双路**：PendingIntent 优先，`startSelf` 兜底。
 
 > 我们额外做、官方 Integration Basics 里没有的：通知监听（`NotificationCatcher`）、
 > 高德 AmapLink 解密、`SyncPlayCore` 把数据采集与连接层解耦。这些属于业务，不影响

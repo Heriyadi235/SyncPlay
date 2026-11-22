@@ -1,5 +1,6 @@
 package com.xigaigai.syncglance.receiver;
 
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
@@ -133,7 +134,66 @@ public class SdlReceiver extends SdlBroadcastReceiver {
             }
         }
 
+        // ① 官方 Android 12+ 路径：先发 Router 递来的 PendingIntent
+        startViaPendingIntent(context, intent);
+
+        /*
+         * ② 自己 start 作为兜底 —— **不能省**。
+         *
+         *   `PendingIntent.send()` 解析失败是**静默**的：system_server 里报
+         *   `Unable to start service ... : not found`，但**不会**回传给发送方，
+         *   所以这里根本拿不到"成功/失败"。2026-11-22 白天就是这样踩过：
+         *   send() 返回正常，`SdlService.onCreate` 却从没执行。
+         *
+         *   Service 重复启动是幂等的：`onStartCommand` 里 `needRebuild()` 会判断
+         *   「已连接就复用」，不会重复建 SdlManager。
+         */
         startSelf(context, intent);
+    }
+
+    /**
+     * 官方 Android 12+ 推荐路径：发 Router 递来的 PendingIntent 来启动服务。
+     *
+     * <h3>为什么它能工作（2026-11-22 查实）</h3>
+     * Router 建的 PendingIntent 目标 Intent 只有 `setPackage(包名)`，没有 component；
+     * `send()` 时 fillIn 会把广播的 action（`sdl.router.startservice`）补进去，
+     * 于是实际执行的是
+     * `startForegroundService(Intent { act=sdl.router.startservice pkg=... })`。
+     *
+     * <p>这属于「隐式服务 Intent」，但 Android 5+ 的「服务必须显式」检查接受
+     * `setPackage`，所以它是**合法的**；之前失败纯粹是因为**没有任何 service
+     * 声明这个 action**（那个 action 只挂在 `SdlReceiver` 这个 receiver 上）。</p>
+     *
+     * <p>现在 `SdlService` 在 Manifest 里声明了同名 intent-filter，它就能被解析到 ——
+     * 这才是官方 Must 真正落实的地方（保留「由 Router 前台服务创建 PendingIntent」
+     * 带来的 FGS 启动豁免语义）。</p>
+     *
+     * @return true = PendingIntent 已发出（**不代表服务一定起来了**，见上面 ② 的说明）
+     */
+    private boolean startViaPendingIntent(Context context, Intent intent) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false;   // API 31+
+        if (intent == null) return false;
+
+        Object extra;
+        try {
+            extra = intent.getParcelableExtra(TransportConstants.PENDING_INTENT_EXTRA);
+        } catch (Exception e) {
+            return false;
+        }
+        if (!(extra instanceof PendingIntent)) return false;
+
+        try {
+            ((PendingIntent) extra).send(context, 0, intent);
+            Log2.i(TAG, "已通过 PendingIntent 启动 SdlService（官方 Android 12+ 路径）");
+            return true;
+        } catch (PendingIntent.CanceledException e) {
+            Log2.w(TAG, "PendingIntent 已失效（CanceledException），走 startSelf 兜底");
+            return false;
+        } catch (Exception e) {
+            Log2.w(TAG, "PendingIntent.send 失败（" + e.getClass().getSimpleName()
+                    + "），走 startSelf 兜底");
+            return false;
+        }
     }
 
     /**

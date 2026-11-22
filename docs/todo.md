@@ -48,60 +48,40 @@
 
 ### A · 生命周期
 
-#### A1 · 按官方 Must 用 PendingIntent 启动 `SdlService` 🔴 待尝试
+#### A1 · 按官方 Must 用 PendingIntent 启动 `SdlService` —— ✅ 已落地（2026-11-22 晚）
 
-> 用户要求「强迫症般对齐官方实现」，所以这条即使当前走不通也要留在待办里。
+> 用户要求「强迫症般对齐官方实现」。本项已实现，**只剩上车复验**。
 
-**目标**：官方 Integration Basics 要求 Android 12+（API 31+）在 `onSdlEnabled` 里
-用 Router 递来的 `TransportConstants.PENDING_INTENT_EXTRA` 启动服务，
-而不是自己 `startForegroundService`。我们目前**只走后者**。
+**做了什么**：
 
-**为什么现在走不通**（2026-11-22 查实）：
+1. `AndroidManifest.xml`：给 `SdlService` 加 `<intent-filter>`
+   声明 `sdl.router.startservice` —— 让 Router 那个 PendingIntent 能解析到它
+2. `SdlReceiver.onSdlEnabled`：恢复**双路** —— 先 `startViaPendingIntent()`，
+   再 `startSelf()` 兜底
 
-- 反编译 `SdlRouterService` 发送广播那段，它建的 PendingIntent 目标 Intent 是
-  `new Intent().setPackage(getPackageName())` —— **没有 component、没有 action**
-- 而 `SdlService` 在 Manifest 里**没有任何 intent-filter**，只能靠显式组件启动
-- 2026-11-21 12:49 实车日志：`已通过 PendingIntent 启动 SdlService`（`send()` 成功、无异常），
-  但 `SdlService.onCreate` **从未执行**，车机最后超时
+**为什么之前走不通 → 怎么查明的**：
 
-**要试的三条路**（按可行性排序）：
+- 反编译 `SdlRouterService`：它建的 PendingIntent 目标 Intent 是
+  `new Intent().setPackage(包名)` —— **没有 component、没有 action**
+- 而 `SdlService` 当时**没有任何 intent-filter** → `send()` 之后 system_server 报
+  `Unable to start service ... : not found`，且该异常**不回传给发送方**
+  （所以 2026-11-21 12:49 日志里只有「已通过 PendingIntent 启动」却什么都没起）
+- 本机用 `am start-foreground-service` 做三组对照实验，定位到真正原因：
 
-1. ✅ **已完成（2026-11-22 23:27，本机用 `am start-foreground-service` 复现）**
+  | 实验 | Intent 形态 | 结果 |
+  |---|---|---|
+  | 1 | `act=sdl.router.startservice` + `pkg` | ❌ `Unable to start service ... not found` |
+  | 2 | `act=com.smartdevicelink.router.service` + `pkg`（Router 真声明的） | ✅ 解析到 `SdlRouterService` 并拉起进程 |
+  | 3 | 只有 `pkg` | ❌ 什么都没起 |
 
-   | 实验 | Intent 形态 | 结果 |
-   |---|---|---|
-   | 1 | `act=sdl.router.startservice` + `pkg` | ❌ `Unable to start service ... **not found**` |
-   | 2 | `act=com.smartdevicelink.router.service` + `pkg`（Router 真正声明的那个） | ✅ 解析到 `SdlRouterService` 并拉起进程 |
-   | 3 | 只有 `pkg`（无 action、无 component） | ❌ 什么都没起 |
+  结论：**不是「隐式 Intent 不合法」**（`setPackage` 就够，实验 2 证明），
+  而是**没有 service 声明那个 action**（它只挂在 `SdlReceiver` 这个 receiver 上）。
 
-   **两条硬结论**：
-   - 失败原因是**「没有 service 声明 `sdl.router.startservice`」**
-     （那个 action 只挂在 `SdlReceiver` 这个 **receiver** 上），
-     **不是**「隐式 Intent 不合法」
-   - **实验 2 证明「package + action」的隐式服务 Intent 合法且能解析**
-     （Android 5+ 的「服务 Intent 必须显式」检查接受 `setPackage`）
+**修法（已落地）**：给 `SdlService` 加同名 intent-filter →
+本机实测同一条命令现在直接拉起 `SdlService`，且
+`isForeground=true foregroundNoti=Notification(channel=syncglance ...)`。
 
-2. **给 `SdlService` 加 intent-filter**（声明 `sdl.router.startservice`）——
-   **从「存疑」升级为「可行」**：实验 2 已证明只要 action 对应到某个声明它的 service
-   就能解析；而 receiver 与 service 的解析空间**互不影响**，与 `SdlReceiver` 的同名
-   action **不冲突**。这样 Router 那个 PendingIntent（fillIn 后带该 action）就能
-   解析到我们的 `SdlService` —— **真正落实官方 Must，且保留豁免语义**。
-   落地时保留 `startSelf()` 作兜底，形成官方建议的「双路」。
-
-3. **自建 PendingIntent**：`PendingIntent.getForegroundService(ctx, 0, Intent(ctx, SdlService.class), flags)`
-   —— 能指名服务，但**失去官方说的豁免意义**（豁免来自「由 Router 这个前台服务创建它」），
-   等于绕一圈回到 `startForegroundService`，只多了一层包装。**只在第 2 条失败时才考虑。**
-
-**下一步**：按路线 2 改 Manifest + 恢复 `startViaPendingIntent()` 做双路，然后上车验证。
-
-**验收**：上车日志出现 PendingIntent 路径且 `★ 进入 FULL`；
-若路线 2 也失败，把「无法落实」的结论与证据写回
-[`sdl生命周期-场景对照.md`](sdl生命周期-场景对照.md) 注②。
-
-**为什么值得试**：`startForegroundService` 现在能过，靠的是
-「同 uid 有 Router 前台服务 → 整个 uid 不算后台」这个事实
-（证据见 `连接可靠性排查.md` §11.1）。官方这条 Must 本来就是为这种场景准备的保险，
-只是 5.8.0 没给到可用的 Intent。
+**验收（待上车）**：见本文「五、上车测试待确认项」的 T1~T6。
 
 ---
 
@@ -287,6 +267,44 @@ OnLockScreenStatus { showLockScreen: REQUIRED, driverDistraction: true, hmiLevel
 ---
 
 ## 五、上车测试待确认项
+
+### 5.1 本轮（2026-11-22 晚）改动专项 —— 优先看这几条
+
+> 本轮改了：PendingIntent 双路启动、通知恢复 + 新文案/图标、BootReceiver 日志措辞。
+
+**T1 · PendingIntent 路径是否真的生效（最重要）**
+- [ ] 日志出现 `已通过 PendingIntent 启动 SdlService（官方 Android 12+ 路径）`
+- [ ] 紧随其后有 `已直接启动 SdlService（startForegroundService）`（兜底也走一遍，正常）
+- [ ] **不应**出现 `Unable to start service ... : not found`
+- [ ] **不应**出现 `ForegroundServiceStartNotAllowedException` / `★ 启动 SdlService 失败`
+- [ ] 之后正常 `★ 进入 FULL`
+
+**T2 · 通知外观**
+- [ ] 标题是「西改改的Sync」，左侧小图标是 SDL 六边形线框，**右侧没有大图标**
+- [ ] 落在「静音」分组，不响铃、不弹横幅
+- [ ] 与库那条通知（`SDL: com.xigaigai.syncglance` + 绿色大图标）同时存在时不打架
+
+**T3 · 通知文案是否随状态走**
+- [ ] `Waiting for connection (Router listening)` 或 `(Bluetooth not connected)`
+- [ ] 连接中 → `Connecting through SDL (Registering)` → `(Waiting for head unit)`
+- [ ] 连上后 → `Connected through SDL (FULL: IDLE / PLY / NAV / PLY/NAV)`
+- [ ] 车机切到后台/受限时 → `(BACKGROUND: …)` / `(LIMITED: …)`
+- [ ] 断开后通知消失（`Connection closed` 只会闪一下，属正常）
+
+**T4 · 秒失败重试的可见性**
+- [ ] 若出现 `⚠ 秒失败`，通知应短暂显示 `Connecting through SDL (Retrying 1/4)`
+- [ ] 重试后能正常连上，且计数不超过 1~2
+
+**T5 · 新日志措辞（冷/热启动判定）**
+- [ ] 进程是被广播拉起时 → `[Boot] 【进程被拉起】蓝牙 ACL_CONNECTED ← SYNC`
+- [ ] 进程本来就在跑时 → `[Boot] 【进程已运行】收到 蓝牙 ACL_CONNECTED ← SYNC`
+- [ ] 若「明明是被拉起却显示已运行」→ 1500ms 阈值需要调大
+
+**T6 · 回归**
+- [ ] 四状态显示、歌词滚动、导航、计时器、软键/按键都正常
+- [ ] 断开重连连续 3 轮都稳（含「关掉 App 再上车」这种冷启动场景）
+
+### 5.2 早前遗留项（有空再看）
 
 按 14 章清单执行，重点这几条：
 
