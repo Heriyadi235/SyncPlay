@@ -86,6 +86,17 @@ public class SdlService extends Service {
      */
     public static final String APP_ID = "1397139053";
 
+    /**
+     * RPC 会话恢复标识（{@code SdlManager.Builder.setResumeHash}）。
+     *
+     * <p>5.8.0 删掉了 4.x 的 {@code autoActivateID} 整套能力，官方在 5.x 给的
+     * 对应机制就是它：同一个 hash 的会话在断连后可以**恢复**，而不是从零重新注册。</p>
+     *
+     * <p>需要车机支持 resumption（SDL 4.0+）。本车机是 SDL 2.1，
+     * 大概率会忽略这个字段 —— 忽略不影响连接，所以设上没有风险。</p>
+     */
+    public static final String RESUME_HASH = "syncplay-session";
+
     private static SdlService instance;
     /** 5.x 的连接入口（4.x 的 SdlProxyALM 已被上游移除） */
     private volatile SdlManager sdlManager;
@@ -494,9 +505,10 @@ public class SdlService extends Service {
              *     1. isMediaApplication 没有直接 setter —— 只能靠 setAppTypes([MEDIA]) 推导。
              *        漏了它 → isMediaApplication=false → 车机很可能不再给 mediaTrack 和第 3/4 行，
              *        整个双屏布局会崩。这是本次迁移最容易踩的坑。
-             *     2. autoActivateID 在新版 SDK 里<b>没有等价 API</b>（只剩 setResumeHash，
-             *        那是 RPC 会话恢复，需要车机支持 resumption，SYNC 1.1 大概率不支持）。
-             *        所以这个能力在迁移版里是缺失的，属于已知取舍。
+             *     2. autoActivateID：5.8.0 **整套删掉了**（Builder 无 API、
+             *        RegisterAppInterfaceResponse 无该字段、整个 classes 搜不到 AutoActivate）。
+             *        官方在 5.x 的对应机制是 setResumeHash（RPC 会话恢复），
+             *        见下面 builder.setResumeHash(RESUME_HASH) 的注释。
              *     3. 语言：新版 Builder 在 build() 时若 hmiLanguage 为 null 会强制设成 EN_US。
              *        实测这台车机是 ZH-CN，所以这里显式写死 ZH_CN（按用户要求）。
              *     4. build() 之后要调 start()，是异步的；onStart() 才是"注册完成"。
@@ -517,12 +529,66 @@ public class SdlService extends Service {
 
             SdlManager.Builder builder = new SdlManager.Builder(
                     this, APP_ID, APP_NAME, newManagerListener(gen));
-            // 关键：没有这个车机搜不到（MultiplexTransportConfig）
-            builder.setTransportType(new MultiplexTransportConfig(getApplicationContext(), APP_ID));
+            /*
+             * ★ 传输配置：必须显式传 FLAG_MULTI_SECURITY_OFF（2026-11-22 确认的根因）。
+             *
+             *   官方 Integration Basics 的写法就是三参：
+             *     new MultiplexTransportConfig(this, APP_ID, MultiplexTransportConfig.FLAG_MULTI_SECURITY_OFF)
+             *
+             *   为什么非它不可 —— 反编译 RouterServiceValidator 看到的：
+             *
+             *     · 默认安全等级 = getSecurityLevel() = SharedPreferences 里的
+             *       sdl_rsvp_security_level，默认 **32（MED）**
+             *     · validateAsync() 有两条路：
+             *         路径 A：consumeQueuedRouterService() 拿到的 Router **属于本应用** →
+             *                 onFinishedValidation(true)，**跳过全部校验**
+             *         路径 B：队列为空 → FindRouterTask 通用查找 → checkTrustedRouter()
+             *     · checkTrustedRouter 里 trusted = (securityLevel == 0)；
+             *       否则要求 wasInstalledByAppStore(pkg) 且 isTrustedPackage(pkg)：
+             *         - 我们是 adb 安装，installer 为 null → wasInstalledByAppStore = false
+             *         - 信任列表缓存是空的（{"response":{}}）→ isTrustedPackage = false
+             *       → trusted = false → Router 被判不可信 → SdlManager **同步** onDestroy
+             *
+             *   实车表现（2026-11-21 18:12~18:15）：路径 A 命中就成功，
+             *   一旦走路径 B 就 2ms / 7ms / 12ms 秒退 —— 而「首次连接能行、
+             *   恢复连接不行」正是这两条路的差别。
+             *
+             *   传 OFF(0) 之后：checkTrustedRouter 直接 trusted = true，
+             *   且 createTrustedListRequest 也不再访问
+             *   woprjr.smartdevicelink.com 去拉信任列表。两条路都通。
+             *
+             *   代价：不再校验 Router 的信任性。对自用应用可接受；
+             *   而且本车机是 SDL 2.1，MED 等级要求的加密它本来也不支持。
+             */
+            builder.setTransportType(new MultiplexTransportConfig(
+                    getApplicationContext(), APP_ID,
+                    MultiplexTransportConfig.FLAG_MULTI_SECURITY_OFF));
+            Log2.i(TAG, "传输配置：SECURITY_OFF + Multiplex（安全等级=0，跳过信任校验）");
             builder.setShortAppName(SHORT_APP_NAME);
             builder.setAppTypes(appTypes);                       // → isMediaApplication = true
             builder.setLanguage(Language.ZH_CN);                  // 硬写中文
             builder.setRPCNotificationListeners(listeners);       // 注册前预挂，避免漏掉早期通知
+
+            /*
+             * ★ 会话恢复：5.x 只剩 setResumeHash（2026-11-22 查证）。
+             *
+             *   4.12.2 有 SdlProxyBuilder.Builder.setAutoActivateID(String)，
+             *   但 5.8.0 **把整个能力删了** —— 硬证据：
+             *     · SdlManager.Builder 上没有任何 AutoActivate 相关 API
+             *     · RegisterAppInterfaceResponse 里连 autoActivateID 字段都没有
+             *     · 整个 sdl_android 5.8.0 的 classes 搜不到 "AutoActivate" 字样
+             *   （SharedPreferences 里那个 auto_activate_id 是更早版本的残留：
+             *     4.12.2 也不写这个键，它只存在于 proxy 层内存里。）
+             *
+             *   所以严格意义上「恢复 autoActivateID」在 5.x 做不到。
+             *   官方在 5.x 提供的对应机制是 resumeHash（RPC 会话恢复）：
+             *   同一个 hash 的会话在断连后可以恢复状态，而不是重新注册一遍。
+             *
+             *   ⚠ 它需要车机支持 resumption（SDL 4.0+）。本车机是 SDL 2.1，
+             *     大概率不支持 —— 不支持时车机会忽略 hashID 字段，不影响连接。
+             *     若以后实测发现 RAI 被拒，把下面这行注释掉即可。
+             */
+            builder.setResumeHash(RESUME_HASH);
 
             sdlManager = builder.build();
             lifecycle.onProxyCreated();

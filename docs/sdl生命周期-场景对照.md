@@ -122,7 +122,7 @@ sdl.router.startservice
 | 20 | **API 34+ 要先检查 `AndroidTools.hasForegroundServiceTypePermission(context)`**，没有就 return | **Must**（API 34+） | 已在 `SdlReceiver.onSdlEnabled` 加 | ✅ 2026-11-21 落实 |
 | 21 | `getSdlServiceName()` 默认返回 `"SdlService"`，类名不同要覆写 | Note | 我们的类就叫 `SdlService`，默认值正确 | ✅ |
 | 22 | `MultiplexTransportConfig` 连车机 | 要求 | `new MultiplexTransportConfig(ctx, APP_ID)` | ✅ |
-| 23 | 官方示例传 `FLAG_MULTI_SECURITY_OFF` | 示例 | 我们**不传**（用默认安全等级） | ⚠ 见 §7.3（这直接关系到那个崩溃） |
+| 23 | 官方示例传 `FLAG_MULTI_SECURITY_OFF` | 示例 | 已传（2026-11-22） | ✅ 这是恢复连接失败的根因，见 §7.3 |
 | 24 | MainActivity.onCreate 里 `SdlReceiver.queryForConnectedService(this)` | 要求 | 有 | ✅ |
 | 25 | Lock Screen 必须实现（否则不能上架） | **Must**（发布） | 没做 | ⚠ 不上架，接受 |
 | 26 | 软键：**不要混用 ScreenManager 与手动 `Show`** | Note | 只用手动 `Show` | ✅ |
@@ -433,8 +433,7 @@ if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) return;   //
 | 7 | `handleConnectionClosed` 里 `stopSelf()` 前先 `updateNotification()` | 让状态可见 | — |
 | 8 | 崩溃兜底 `UncaughtExceptionHandler` | 只写日志，不吞异常 | — |
 | 9 | 不 `deleteNotificationChannel`（官方示例删） | 留渠道避免反复创建 / 丢用户设置 | — |
-| 10 | 不传 `FLAG_MULTI_SECURITY_OFF`（官方示例传） | 不擅自降低安全等级 | 🟢 能连，但见 §7.3 |
-| 11 | 不做 Lock Screen（官方发布 Must） | 不上架 | — |
+| 10 | 不做 Lock Screen（官方发布 Must） | 不上架 | — |
 
 > **2026-11-21 已撤回的两项**：
 > ① Router 类命名 —— 已按官方 Must 改为 `SdlRouterService`；
@@ -486,16 +485,71 @@ if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
   `✓ SdlRouterService entry and metadata checks passed` /
   `✓ SdlRouterService intent filter check passed` ✓
 
-### 7.3 ⚠ 仍存在：`FLAG_MULTI_SECURITY_OFF` 与那个崩溃的关系
+### 7.3 ✅ 已修复：信任校验（恢复连接失败的真根因，2026-11-22）
 
-官方示例传 `FLAG_MULTI_SECURITY_OFF`（降低安全等级）。我们不传，于是走完整安全等级
-→ 走**信任列表校验**（`RouterServiceValidator.createTrustedListRequest` → `bindService`）
-→ 这才是 18:31/18:33 崩溃的触发路径。
+**症状**：首次连接能成，下车再上车连不上；日志里是
+`连接结束（CONNECTING）［建连至今 2~12ms］`，而且它**早于** `✓ SdlManager 已启动` ——
+说明 `sdlManager.start()` **同步**就判了失败，不是传输超时。
 
-**换句话说**：照官方示例传这个 flag，那个崩溃可能压根不会发生。
+**根因（反编译 `RouterServiceValidator` + 实测 `SharedPreferences`）**
 
-但这是**用降低安全性换稳定性**。我们的选择是「保持安全等级，改用合规的调用位置」。
-如果以后还想进一步降低崩溃风险，可以考虑这个 flag —— 前提是先确认对本车无副作用。
+`validateAsync()` 有两条路：
+
+| 路径 | 条件 | 结果 |
+|---|---|---|
+| **A. 快捷** | `consumeQueuedRouterService()` 拿到 Router，且**属于本应用包** | `onFinishedValidation(true)`，**跳过全部校验** |
+| **B. 通用** | 队列为空 → `FindRouterTask` 查设备 | 查完进 `checkTrustedRouter()` |
+
+而 `checkTrustedRouter` 是：
+
+```java
+boolean trusted = (securityLevel == 0);
+if (!trusted) {
+    trusted = pkg != null && wasInstalledByAppStore(pkg) && isTrustedPackage(pkg, pm);
+}
+```
+
+我们当时的状态（`shared_prefs/sdl.xml` 实读）：
+
+```xml
+<int name="sdl_rsvp_security_level" value="32" />         ← MED
+<string name="sdl_package_list">{"response":{}}</string>  ← 信任列表是空的
+```
+
+→ `securityLevel != 0`；`wasInstalledByAppStore` 因 adb 安装（installer=null）为 false；
+`isTrustedPackage` 在空列表里 `getJSONObject("com.xigaigai.syncglance")` 抛 JSONException 为 false。
+**三条全 false → Router 被判不可信 → 同步 `onDestroy`。**
+
+**这正好解释"首次能、恢复不能"**：首次走路径 A（队列里有自己的 Router），一旦走路径 B 就秒退。
+
+**修复**：传输配置显式传 `FLAG_MULTI_SECURITY_OFF`（= 0），也就是官方示例的写法。
+
+```java
+new MultiplexTransportConfig(getApplicationContext(), APP_ID,
+        MultiplexTransportConfig.FLAG_MULTI_SECURITY_OFF)
+```
+
+传 0 之后：
+- `checkTrustedRouter` 第 227-232 行 → `trusted = true`，**路径 B 也通**
+- `createTrustedListRequest` 第 741-749 行 → 直接回调成功，**不再访问
+  `woprjr.smartdevicelink.com` 拉信任列表**
+- 且 `validateAsync` 开头只在 `securityLevel == -1` 时才用缓存覆盖，**0 不会被改回去**
+
+**代价**：不再校验 Router 信任性、不联网。对自用应用可接受；本车机 SDL 2.1 也不支持
+MED 等级要求的加密。
+
+### 7.6 `autoActivateID`：5.x 已彻底移除，用 `setResumeHash` 替代
+
+| 版本 | 情况 |
+|---|---|
+| 4.12.2 | 有 `SdlProxyBuilder.Builder.setAutoActivateID(String)`；但 **AppLinkPro 从没调用它**，车机照样自动激活 |
+| **5.8.0** | **整套能力被删除**：`SdlManager.Builder` 无任何 AutoActivate API；`RegisterAppInterfaceResponse` 连 `autoActivateID` 字段都没有；整个 classes 搜不到 `AutoActivate` 字样 |
+
+> `shared_prefs/sdl.xml` 里那个 `auto_activate_id` 是**更早版本的残留** ——
+> 4.12.2 也不写这个键（它只在 proxy 层内存里），5.8.0 更不写。
+
+**替代**：`builder.setResumeHash(RESUME_HASH)` —— 5.x 官方的 RPC 会话恢复机制。
+需要车机支持 resumption（SDL 4.0+）；本车机 SDL 2.1 大概率忽略，忽略不影响连接。
 
 ### 7.4 ⚠ 新发现：debug 包**首次**启动 Router 会崩一次（第二次正常）
 
