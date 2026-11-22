@@ -207,13 +207,26 @@ public class SdlService extends Service {
     /**
      * 秒失败重试延迟。
      *
-     * 2026-11-22 从 1500 调到 2500：实车（SDL4 对照组）证明车机在蓝牙 ACL 建立后
-     * 有 6~7 秒的「犹豫期」才发起 SDL 连接。2.5s × 4 次 = 10 秒，盖住这个窗口并留余量。
+     * <h3>为什么需要重试</h3>
+     * 5.x 的 TransportManager 不像 4.x 的 TransportBroker 会自己开 RFCOMM 等车机，
+     * 它只 consumeQueuedRouterService()，Router 队列空就 5~9ms 秒退
+     * （根因详见 docs/连接可靠性排查.md 第十节）。
+     *
+     * <h3>为什么是 2500ms / 为什么窗口从 10 秒收紧到 5 秒</h3>
+     * 2026-11-22 实测（受控重试上线后）：
+     *   - 4 次恢复连接里只发生 1 次秒失败，且重试 1 次（2.5 秒后）就成功
+     *   - SdlManager 启动后到车机回话（OnPermissionsChange）的延迟是 2~3 秒
+     *   - 之前 SDL4 对照组看到的 6~7 秒，是 4.x「proxy 建立→车机回话」的全段；
+     *     而 5.x 把它拆成了「等 onSdlEnabled 约 4 秒」+「SdlManager 后 2~3 秒」两段，
+     *     5.x 真正需要重试覆盖的只有后者
+     *
+     * 结论：2.5s × 4 = 10 秒是按「6~7 秒延迟」误估的，过保守；收紧到 2.5s × 2 = 5 秒，
+     * 实测 1 次重试即成功，留一倍余量应对时序抖动。
      */
     private static final long FAST_FAIL_RETRY_DELAY_MS = 2500;
 
-    /** 秒失败最多重试次数（2.5s × 4 = 10 秒覆盖窗口） */
-    private static final int FAST_FAIL_MAX_RETRY = 4;
+    /** 秒失败最多重试次数（2.5s × 2 = 5 秒窗口，实测 1 次即成功，留一倍余量） */
+    private static final int FAST_FAIL_MAX_RETRY = 2;
 
     /**
      * 这次进程起来之后，是否"连上过又断开了"。
