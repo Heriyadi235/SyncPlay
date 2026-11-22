@@ -1146,10 +1146,24 @@ public class StateRenderer {
             } catch (Exception ignored) { }
 
             String from = String.format(java.util.Locale.US, "%02d:%02d", h, m);
-            Log2.i(TAG, "计时器：显示到达时刻 " + clock + " → 两步法 freeze(" + from + ")");
+            Log2.i(TAG, "计时器：显示到达时刻 " + clock
+                    + " → 两步法 freezeLiteral(" + from + ")");
 
-            out.add(freezeClockRpc(h, m, 0)[0]);     // ① COUNTUP 起表
-            out.add(freezeClockRpc(h, m, 0)[1]);     // ② PAUSE 停住
+            /*
+             * ★ 必须用 freezeClockLiteral，不能用 freezeClockRpc。
+             *
+             *   freezeClockRpc 的 h/m/s 是「时长」，会走 clockStart() 累加成秒数
+             *   再夹到 3599 —— 18:11 会被算成 65460 秒 → 夹成 59:59。
+             *   实车日志就是这么出来的：
+             *     [Render] 两步法 freeze(18:11)
+             *     → {"startTime":{"hours":0,"minutes":59,"seconds":59}}   ← 错
+             *
+             *   freezeClockLiteral 把 hh 填进 minutes、mm 填进 seconds，
+             *   车机那一格是 mm:ss，渲染出来就是 "18:11"。
+             */
+            SetMediaClockTimer[] pair = freezeClockLiteral(h, m);
+            out.add(pair[0]);                        // ① COUNTUP 起表
+            out.add(pair[1]);                        // ② PAUSE 停住
 
             lastClockTextSent = navClockText;        // ★ 真要发了才记
             return out;
@@ -1180,7 +1194,7 @@ public class StateRenderer {
     }
 
     /**
-     * 「把时钟格定死在某个读数」的两条指令。
+     * 「把时钟格定死在某个读数」的两条指令 —— <b>按「时长」理解</b>。
      *
      * <pre>
      *   [0] COUNTUP(startTime)   车机开始走表
@@ -1190,11 +1204,39 @@ public class StateRenderer {
      * 两条必须按顺序发（用 {@code sendSequentialRPCs}），中间不能插别的
      * 时钟指令，否则第二条 PAUSE 停的会是别的表。
      *
+     * ⚠ 这里的 h/m/s 是**时长**（如"计时器走了 0:02:35"），会经过
+     *   {@link #clockStart} 换算并夹到 59:59。**显示时刻（如 18:11）不能用这个方法**，
+     *   否则 18*3600+11*60 会被夹成 3599 → 显示 59:59（踩过）。
+     *   显示时刻请用 {@link #freezeClockLiteral}。
+     *
      * @return 长度固定为 2 的数组
      */
     public SetMediaClockTimer[] freezeClockRpc(int h, int m, int s) {
         SetMediaClockTimer up = SetMediaClockTimer.countUpFromStartTime(
                 clockStart(h, m, s), null, AudioStreamingIndicator.PLAY);
+        SetMediaClockTimer pause = SetMediaClockTimer.pauseWithPlayPauseIndicator(
+                AudioStreamingIndicator.PAUSE);
+        return new SetMediaClockTimer[]{up, pause};
+    }
+
+    /**
+     * 两步法的「字面值」变体：{@code mm:ss} 原样填进去，不做时长换算。
+     *
+     * <p>用于把**到达时刻**（如 18:11）打到时钟格上：车机那一格是 mm:ss，
+     * 填 `(minutes=18, seconds=11)` 就渲染成 `18:11`。</p>
+     *
+     * <p>⚠ 不能走 {@link #clockStart}：它把参数当时长累加并夹到 3599 秒，
+     * `18:11` 会被算成 65460 秒 → 夹成 `59:59`。实车日志里的
+     * `{"minutes":59,"seconds":59}` 就是这么来的。</p>
+     *
+     * @param hh 要显示在"分钟"位置的数（0~59）
+     * @param mm 要显示在"秒"位置的数（0~59）
+     */
+    public SetMediaClockTimer[] freezeClockLiteral(int hh, int mm) {
+        int a = Math.max(0, Math.min(59, hh));
+        int b = Math.max(0, Math.min(59, mm));
+        SetMediaClockTimer up = SetMediaClockTimer.countUpFromStartTime(
+                new StartTime(0, a, b), null, AudioStreamingIndicator.PLAY);
         SetMediaClockTimer pause = SetMediaClockTimer.pauseWithPlayPauseIndicator(
                 AudioStreamingIndicator.PAUSE);
         return new SetMediaClockTimer[]{up, pause};
