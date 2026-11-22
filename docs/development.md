@@ -1550,12 +1550,17 @@ Unicode 把所有文字统一到一个码位空间，但**车机字库是按某�
    | `USB_ACCESSORY_ATTACHED` | USB 传输（本车用不到） |
 
 3. **`queryForConnectedService()`** —— 官方给的「应用后启动」补连接手段。
-   现在挂在 `SyncGlanceApp.onCreate`（每个进程一次，失败 2 秒后重试）、
-   `MainActivity.onCreate`，以及 `BootReceiver` 的四个系统广播里。
+   现在**只挂在 `SyncGlanceApp.onCreate`**（每个进程一次，失败 2 秒后重试）和
+   `MainActivity.onCreate`。
    上车时应用不在 → 车机放弃 → 用户后来才打开应用，这一问能让 RouterService
    重新挂起来。官方也注明：**车机端还得重新做一次 SDP 查询**才感知得到，这一步不受应用控制。
 
-4. **`BootReceiver` 只探测，不启动服务**（2026-11-21 修正，提交 `fcbef0a`）。
+   > ⚠ **不要放回 `BootReceiver` 里**（曾经放过）。广播的 context 是
+   > `ReceiverRestrictedContext`，库会拿它 `bindService` → `ReceiverCallNotAllowedException`
+   > → 进程闪退（2026-11-21 实车崩过两次）。只有 Application / Activity 的 context 才安全。
+
+4. **`BootReceiver` 只记日志，既不启动服务也不做探测**（2026-11-21 修正，提交 `fcbef0a`；
+   2026-11-22 起连「探测」的措辞也一并纠正）。
    以前这里是 `startForegroundService(SdlService)`，注释写的是「只保证进程活着」。
    那是 4.x 的语义：`SdlProxyALM` 会自己等 Router。
    **在 5.x 里这行代码的实际效果是立刻建一条 `SdlManager` 连接** —— 而那一刻
@@ -1566,8 +1571,28 @@ Unicode 把所有文字统一到一个码位空间，但**车机字库是按某�
    启动 `SdlService` **全部失败**，只有 `SdlReceiver.onSdlEnabled`（车机已连通 Router）
    那条成功。详见 [连接可靠性排查.md](连接可靠性排查.md)。
 
-> 曾经写过一版"20 秒没连上就 resetProxy 重试两次"的看门狗，已废弃 ——
-> 那是绕开官方机制硬拉，治标不治本。
+5. **两个 receiver 的分工（2026-11-22 澄清，反编译确认）**
+
+   | receiver | 声明 `ACL_CONNECTED` | 收到后做什么 |
+   |---|---|---|
+   | `SdlReceiver`（继承库的 `SdlBroadcastReceiver`） | ✅ | **由库代码拉起 Router**（`wakeUpRouterService()` → `startForegroundService(RouterService)`）；车机连通后再回调 `onSdlEnabled` → 拉起 `SdlService` |
+   | `BootReceiver`（4.x 时代自写） | ✅ | **一个 start 都不调**：只记日志（唤醒来源 + 冷/热启动）+ 维护 MAC 白名单 |
+
+   **Router 自己不听广播** —— 它是 Service 不是 receiver。整个库里唯一匹配
+   `ACL_CONNECTED` 的是 `SdlBroadcastReceiver`。
+
+   所以 `BootReceiver` 那条监听对「拉起」是**冗余**的，删掉不影响连接；
+   留着是因为它记录了「谁把进程叫醒」（`SdlReceiver` 要等车机连通 Router 后才打日志），
+   而且零成本。日志措辞 2026-11-22 起从「【启动来源】」改为按冷热区分：
+
+   ```
+   [Boot] 【进程被拉起】蓝牙 ACL_CONNECTED ← SYNC / <MAC>      ← Application.onCreate 后 1.5s 内
+   [Boot] 【进程已运行】收到 蓝牙 ACL_CONNECTED ← SYNC / <MAC>  ← 进程早就活着
+   [Boot] 【事件】蓝牙已开启                                    ← STATE_CHANGED
+   ```
+
+   > 曾经写过一版"20 秒没连上就 resetProxy 重试两次"的看门狗，已废弃 ——
+   > 那是绕开官方机制硬拉，治标不治本。
 
 ### 8.20 车机上的应用名
 

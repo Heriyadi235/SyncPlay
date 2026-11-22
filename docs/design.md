@@ -578,32 +578,62 @@ App 进程被系统杀掉、或车机重新扫描应用时，车机能凭这个 
 本车实测语言是 `ZH-CN`。硬编码会在车机语言被切换时直接注册失败。
 Ford 自家 `Sync Destinations` 也是留空。
 
-### 5.4 蓝牙唤醒（2026-11-21 修正）
+### 5.4 蓝牙唤醒：两个 receiver 的分工（2026-11-22 定稿）
 
-车机无法主动唤醒手机上的 app，所以靠系统广播把进程叫起来 —— **但只叫进程，
-不建连接**。
+车机无法主动唤醒手机上的 app，所以靠系统广播把进程叫起来 —— **但只叫进程，不建连接**。
 
-| 事件 | 动作 |
+#### 5.4.1 关键事实：Router 自己不听广播
+
+`SdlRouterService` 是 **Service 不是 receiver**，没法监听 `ACL_CONNECTED`，只能被别人启动。
+反编译 `sdl_android 5.8.0` 确认：**整个库里唯一匹配该 action 的是 `SdlBroadcastReceiver`**，
+它收到后调 `wakeUpRouterService()` → `Context.startForegroundService(RouterService)`
+（顺带也是那条 `SDL: 包名 / Waiting for connection...` 通知的来源）。
+
+```
+车机蓝牙连上 → 系统发 ACL_CONNECTED
+  → 命中 SdlReceiver 的 intent-filter（我们继承了库的 SdlBroadcastReceiver）
+  → 系统拉起应用进程 → 库的 SdlBroadcastReceiver.onReceive()
+  → wakeUpRouterService() → startForegroundService(RouterService)
+  → 车机连通 Router → sdl.router.startservice → SdlReceiver.onSdlEnabled()
+  → startForegroundService(SdlService)
+```
+
+#### 5.4.2 本项目两个 receiver 的分工
+
+| receiver | 声明 `ACL_CONNECTED` | 收到后做什么 |
+|---|---|---|
+| `SdlReceiver`（继承库的 `SdlBroadcastReceiver`） | ✅ | **由库拉起 Router**；车机真正连通 Router 后再回调 `onSdlEnabled` → 拉起 `SdlService` |
+| `BootReceiver`（4.x 时代自写） | ✅ | **一个 start 都不调**：只记日志 + 维护 MAC 白名单 |
+
+→ 所以 `BootReceiver` 的 `ACL_CONNECTED` 监听对「拉起」是**冗余**的，删掉不影响连接行为。
+留着是因为它是唯一记录「谁把进程叫醒」的地方（`SdlReceiver` 要等车机连通后才打日志），
+而且零成本（同一次广播进程只拉起一次）。
+
+完整的事件 → 处理者对照：
+
+| 事件 | 谁处理 | 动作 |
+|---|---|---|
+| `ACL_CONNECTED`（任意蓝牙设备） | `SdlReceiver`（库代码） | 拉起 Router |
+| `ACL_CONNECTED` / `ACL_DISCONNECTED` | `BootReceiver` | 只记日志（含设备白名单判断）+ MAC 白名单 |
+| `BOOT_COMPLETED` / 蓝牙 `STATE_CHANGED` / `MY_PACKAGE_REPLACED` | `BootReceiver` | 只记日志 |
+| `sdl.router.startservice` | `SdlReceiver` | `onSdlEnabled` → 启动 `SdlService` |
+
+**`BootReceiver` 明确不做的两件事**（都踩过）：
+
+| 不做 | 原因 |
 |---|---|
-| `ACL_CONNECTED`（目标设备） | `queryForConnectedService` 探测（**不建连接**） |
-| `BOOT_COMPLETED` | 同上 |
-| 蓝牙 `STATE_ON` | 同上 |
-| `MY_PACKAGE_REPLACED` | 同上 |
+| `startForegroundService(SdlService)` | 4.12.2 时代的做法。5.x 里它等于立刻建 `SdlManager`，而库还没把 Router 叫起来（库异步约 110ms，我们 5~20ms）→ Router 还没 listen 就去 bind → 5~11ms 自毁 → 车机卡「正在连接」**2 分钟** |
+| `queryForConnectedService(ctx)` | 广播的 context 是 `ReceiverRestrictedContext`，库会拿它 `bindService` → `ReceiverCallNotAllowedException` → **进程闪退**（实车崩过两次） |
 
-> **⚠ 不要在这些广播里启动 `SdlService`。**
-> 4.12.2 时代 `BootReceiver` 直接 `startForegroundService(SdlService)`，搬进 5.x 之后**必败**：
-> `SdlService.onCreate` 会立刻 `SdlManager.start()`，而此刻库还没把 Router 叫起来
-> —— 库走异步（约 110ms），我们只要 5~20ms，于是必然在 Router 还没 listen 时
-> 去 bind → 5~11ms 自毁 → 车机卡「正在连接」**2 分钟**。
->
-> 真正的启动入口只有一个：`SdlReceiver.onSdlEnabled`（车机已连通 Router 之后）。
-> 完整证据见 [连接可靠性排查.md](连接可靠性排查.md)。
->
-> ★ 2026-11-22 起 `SdlService` 不再是前台服务，`onSdlEnabled` 里改用 `startService`
-> （见 [通知移除与存活权衡.md](通知移除与存活权衡.md)）。上面这条「别在广播里直接启动」
-> 仍然成立 —— 理由不在前台服务，而在 Router 还没就绪。
+> ⚠ **早期版本的本节表格是错的**：曾把「`ACL_CONNECTED` → `queryForConnectedService` 探测」
+> 写成 `BootReceiver` 的行为。那条 2026-11-21 就删了（就是上面那个闪退）。
+> 现在探测只发生在 `SyncGlanceApp.onCreate` 和 `MainActivity.onCreate` ——
+> 那里是 Application / Activity 的 context，调同一个 API 才安全。
 
-#### 5.4.1 设备过滤
+> 真正的服务启动入口只有一个：`SdlReceiver.onSdlEnabled`（车机已连通 Router 之后）。
+> 完整证据见 [连接可靠性排查.md](连接可靠性排查.md) §11.1 / §11.5。
+
+#### 5.4.3 设备过滤（`BootReceiver` 里）
 
 **只响应目标设备**，避免蓝牙耳机/音箱误触发。判定顺序：
 
