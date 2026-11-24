@@ -244,27 +244,44 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------------- 导航 ----------------
 
-    /** 拉起高德，几秒后尝试连接 AmapLink */
+    /**
+     * 「高德地图」按钮 —— 已连接就只跳转；未连接则拉起高德并重试绑定。
+     *
+     * <h3>为什么这样分工</h3>
+     * 已连接时再触发一轮重连没有意义，只会白白重置状态（甚至打断正在收数据的连接）。
+     * 未连接时才是真正需要"满血复活"的场景：高德被关掉后，
+     * {@code AmapLinkClient} 的重试预算可能已经耗尽（8 次），
+     * 这里通过 {@link AmapLinkClient#wakeUpFromMapLaunch()} 无条件重置预算 + 立即重绑 ——
+     * 对应参考实现 hypercar 的 {@code start(context, mapStarted = true)}。
+     */
     private void launchAmapAndConnect() {
+        AmapLinkClient amap = AmapLinkClient.get(this);
+
+        // ① 已连接：只跳转，不碰连接状态
+        if (amap.isRegistered()) {
+            openAmap();
+            toast("已打开高德");
+            return;
+        }
+
+        // ② 未连接：拉起高德，几秒后重新绑定
+        if (!openAmap()) return;
+        toast("已打开高德，正在连接…");
+        Log2.i("UI", "手动拉起高德，5 秒后重绑 AmapLink");
+        main.postDelayed(amap::wakeUpFromMapLaunch, 5000);
+    }
+
+    /** 打开高德主界面；返回是否成功 */
+    private boolean openAmap() {
         try {
             Intent i = getPackageManager().getLaunchIntentForPackage("com.autonavi.minimap");
-            if (i == null) { toast("高德未安装"); return; }
+            if (i == null) { toast("高德未安装"); return false; }
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(i);
-
-            // ★ 已经连上就别再排一次重连，省掉 5 秒空等
-            AmapLinkClient amap = AmapLinkClient.get(this);
-            if (amap.isRegistered()) {
-                Log2.i("UI", "拉起高德（AmapLink 已连接，不再重连）");
-                toast("已打开高德");
-                return;
-            }
-
-            toast("已打开高德，正在连接…");
-            Log2.i("UI", "手动拉起高德，5 秒后连接 AmapLink");
-            main.postDelayed(amap::wakeUp, 5000);
+            return true;
         } catch (Exception e) {
             toast("打开高德失败");
+            return false;
         }
     }
 
@@ -468,6 +485,25 @@ public class MainActivity extends AppCompatActivity {
         // 只在页面可见时刷新状态；onPause 会停掉
         main.removeCallbacks(stateTicker);
         main.postDelayed(stateTicker, STATE_TICK_MS);
+
+        /*
+         * 用户回到主界面 = 一次「他可能刚开过高德」的时机。
+         *
+         * 这是**一次性**调用，不是轮询：只在页面可见时触发，没有定时器。
+         * 场景：高德被关掉 → 用户重开 → 切回 SyncPlay 主界面 → 这里补一次重试，
+         * 不必让用户专门去点「高德地图」按钮。
+         *
+         * wakeUp() 内部自带幂等：已连接 / 正在连接中都会静默返回，
+         * 不会打断进行中的连接。
+         */
+        main.postDelayed(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            AmapLinkClient amap = AmapLinkClient.get(this);
+            if (!amap.isRegistered()) {
+                Log2.i("UI", "主界面恢复，补一次 AmapLink 重试（若已连接则静默跳过）");
+                amap.wakeUp();
+            }
+        }, 1500);
     }
 
     @Override

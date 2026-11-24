@@ -66,23 +66,20 @@ public class AmapLinkClient {
     /** 单包上限 */
     private static final int MAX_BYTES = 4 * 1024 * 1024;
     /**
-     * 最多重连次数。
+     * 最多重连次数 —— 8 次（对齐参考实现 hypercar 的 {@code LinkBindingState}）。
      *
-     * <p>官方 iOS SDK 推荐 maxReconnectAttempts = 50 / reconnectDelay = 2（≈100 秒），
-     * 那是"连接健壮性"视角；代价是**持续唤醒**——高德没跑时（很常见）
-     * 开车路上会一直 bindService + 起 watchdog，挺费电。</p>
+     * <p>配合递增退避（2s → 4s → … 封顶 15s），8 次大约覆盖 <b>72 秒</b>：
+     * 足够扛过"高德刚启动、服务还没起来"的竞态，又不会像固定 2 秒 × 50 次那样
+     * 持续唤醒 100 秒（高德没跑时很常见，费电）。</p>
      *
-     * <p>改成 10 次 ≈ 60 秒：前 5 次 2 秒（覆盖"高德刚启动"的竞态），
-     * 后 5 次 10 秒。之后要重连，用户点一下高德、或它启动发的通知会把
-     * 超时标记清掉，{@link #wakeUp()} 会重新开一轮。</p>
+     * <p>试满之后要重新连，靠这三条路重置预算（见 {@link #resetAttempts()}）：
+     * 用户点「高德地图」按钮、车机连上、信息页打开。</p>
      */
-    private static final int MAX_ATTEMPTS = 10;
-    /** 前几次用短间隔 */
-    private static final int FAST_ATTEMPTS = 5;
-    /** 重连间隔（官方推荐 2 秒） */
-    private static final long RETRY_DELAY_MS = 2_000;
-    /** 后几次的间隔（省电） */
-    private static final long SLOW_RETRY_DELAY_MS = 10_000;
+    private static final int MAX_ATTEMPTS = 8;
+    /** 退避基数：第 n 次重试用 {@code n × 2s}，封顶 15s */
+    private static final long RETRY_BASE_MS = 2_000;
+    /** 退避上限 */
+    private static final long RETRY_MAX_MS = 15_000;
     /** 绑定/注册超时 */
     private static final long WATCHDOG_MS = 10_000;
 
@@ -121,9 +118,39 @@ public class AmapLinkClient {
         if (previewVisible == visible) return;
         previewVisible = visible;
         Log2.i(TAG, "预览页" + (visible ? "已打开（非 FULL 时开始解析导航包）" : "已关闭（非 FULL 时停止解析）"));
+        resumeIfPausedForPower();
     }
 
     public static boolean isPreviewVisible() { return previewVisible; }
+
+    /**
+     * 因为"没人看"而暂停过重试，现在有人看了（车机连上 / 预览打开）→ 自动恢复。
+     *
+     * <p>以前 {@code retry()} 在 {@code !shouldDecode()} 时直接 {@code return}，
+     * 既不排下一次 bind、也不留任何标记 —— 等于静默停止，之后就算条件恢复，
+     * 也没人再启动它。现在用 {@link #pausedForPower} 记下来，条件一变就唤醒。</p>
+     */
+    private static void resumeIfPausedForPower() {
+        if (!shouldDecode()) return;
+        AmapLinkClient inst = instance;
+        if (inst == null) return;
+        boolean wasPaused;
+        synchronized (inst) {
+            wasPaused = inst.pausedForPower;
+            if (!wasPaused) return;
+            inst.pausedForPower = false;
+        }
+        Log2.i(TAG, "有人看导航了（车机连上 / 预览打开），恢复重试");
+        inst.wakeUp();
+    }
+
+    /**
+     * 因省电暂停了重试（既没连车机、也没开预览）。
+     *
+     * <p>不是"放弃"，是"挂起"——{@link #resumeIfPausedForPower()} 会在条件恢复时
+     * 重新开始，用户点「高德地图」按钮或调用 {@link #wakeUp()} 也会清掉它。</p>
+     */
+    private volatile boolean pausedForPower = false;
 
     /** 是否应该解码（车机连着，或者用户正在看预览页） */
     private static boolean shouldDecode() {
@@ -131,7 +158,10 @@ public class AmapLinkClient {
     }
 
     public static void setHeadUnitConnected(boolean connected) {
+        boolean changed = headUnitConnected != connected;
         headUnitConnected = connected;
+        // 车机连上 = 有人看导航了 → 若之前因省电挂起，自动恢复
+        if (changed && connected) resumeIfPausedForPower();
     }
 
     public static boolean isHeadUnitConnected() { return headUnitConnected; }
@@ -267,34 +297,69 @@ public class AmapLinkClient {
      * <p>现在：前 5 次 2 秒（覆盖"高德刚启动、需要快点连上"的场景），
      * 之后拉长到 10 秒，总共 10 次 ≈ 60 秒就停。唤醒次数从 50 降到 10。</p>
      */
+    /**
+     * 重试间隔：递增退避，与参考实现 hypercar 一致。
+     *
+     * <pre>
+     *   第 1 次 2s → 第 2 次 4s → 第 3 次 6s … 封顶 15s
+     * </pre>
+     *
+     * 比起固定 2 秒，同样能把"高德刚起"的竞态覆盖住，
+     * 但试到后面时唤醒间隔拉长，总唤醒次数少很多。
+     */
     private long retryDelay() {
-        return attempts <= FAST_ATTEMPTS ? RETRY_DELAY_MS : SLOW_RETRY_DELAY_MS;
+        return Math.min(RETRY_BASE_MS * Math.max(1, attempts), RETRY_MAX_MS);
     }
 
     /**
      * 外部唤醒：重新开始一轮重试。
      *
      * 触发时机：
-     *   - 用户点了「高德地图」按钮
      *   - 用户点了「回家 / 去公司」
+     *   - 车机连上 / 信息页打开（见 resumeIfPausedForPower）
      *   - 收到高德的通知（说明它启动了）
      */
     public void wakeUp() {
+        wakeUp(false);
+    }
+
+    /**
+     * 用户**拉起高德地图**时的唤醒 —— 对应参考实现 hypercar 的
+     * {@code AmapLinkProbe.start(context, mapStarted = true)}。
+     *
+     * <h3>为什么它和普通 wakeUp 不同</h3>
+     * "用户刚打开高德"是最确定的信号：地图马上会起服务。这时值得
+     * <b>无条件重置重试预算、并且打断当前正在进行的尝试立刻重绑</b>，
+     * 而不是等退避定时器慢慢到期。
+     *
+     * <p>这正是解决「高德被关闭后再打开、导航数据不再推送」的关键入口：
+     * 试满 8 次后预算耗尽，用户点一下「高德地图」按钮就能满血复活。</p>
+     */
+    public void wakeUpFromMapLaunch() {
+        Log2.i(TAG, "用户拉起高德地图 → 重置重试预算并立即重绑");
+        wakeUp(true);
+    }
+
+    /**
+     * @param force true = 立即打断当前尝试重新绑定（ignores "正在连接中"）
+     */
+    private void wakeUp(boolean force) {
+        Attempt old = null;
         synchronized (this) {
-            if (registered) {
-                // 已连接就静默返回：这个方法是"高德发了条通知"触发的，会非常频繁，
-                // 每次打一条日志就是刷屏（用户明确要求只保留成功/失败）
-                return;
-            }
+            if (registered && !force) return;   // 已连接，静默返回（通知触发时会很频繁）
             if (closed) {
                 Log2.i(TAG, "服务已关闭，重新启动");
                 closed = false;
             }
             if (current != null) {
-                return;        // 正在连接中，静默忽略
+                if (!force) return;             // 正在连接中，静默忽略
+                old = current;                  // force：先把旧尝试作废
+                current = null;
             }
-            attempts = 0;      // 重置重试计数
+            attempts = 0;                       // 重置重试计数
+            pausedForPower = false;
         }
+        if (old != null) old.retire();
         Log2.i(TAG, "收到唤醒，重新尝试连接高德");
         bind();
     }
@@ -343,18 +408,23 @@ public class AmapLinkClient {
          *
          *   shouldDecode() = 已连车机 || 信息页可见。
          *   两者都不成立时（比如平时放在兜里、也没连车机），继续 bindService
-         *   纯属浪费电。等用户打开信息页 / 车机连上，wakeUp() 会重新开始。
+         *   纯属浪费电。等用户打开信息页 / 车机连上，会自动恢复（见 resumeIfPausedForPower）。
+         *
+         * ★ 注意这里是**挂起**不是**放弃**：标记 pausedForPower，
+         *   条件一变就回来。以前只是 return，什么标记都不留 → 静默死掉。
          */
         if (!shouldDecode()) {
             a.retire();
             current = null;
+            pausedForPower = true;
+            Log2.i(TAG, "省电挂起：没连车机也没开预览，等外部唤醒");
             return;
         }
 
         /*
          * 重试过程不打日志。
          *
-         * 高德没启动时会连试 10 次（约 60 秒），每次一条就是刷屏；
+         * 高德没启动时会连试 8 次（退避合计约 72 秒），每次一条就是刷屏；
          * 用户只需要知道「连上了」或者「试满次数还是连不上」。
          * 后者在 bind() 开头那次 beginAttempt() 失败时已经有一条汇总日志。
          */

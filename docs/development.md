@@ -1737,6 +1737,53 @@ Router 没跑 ≈ 车机蓝牙没连上，通知里就该如实说「蓝牙未�
   同一个 appName 的注册请求、卡在「恢复连接」）
 - SDL 5.8 没有 `isRouterServiceRunning()` 这类 API，只能自己上报
 
+### 8.27 高德被关闭后重开，导航数据不再推送
+
+**现象**：导航中途把高德杀掉或划掉，之后重新打开高德并开始导航，
+SyncPlay 再也收不到导航数据，必须重启 App。
+
+**根因链**（三条叠加）：
+
+1. `onServiceDisconnected` → `retry()` → `retire()`（unbind）+ 延迟 rebind。
+2. `retry()` 在 `!shouldDecode()`（既没连车机、也没开预览）时**直接 return** ——
+   既不排下一次 bind，也不留任何标记，等于**静默死掉**。
+3. 重试预算 `attempts` 只在 `start()` / `wakeUp()` 里重置。
+   高德"重新打开"时**不一定会发通知**，`NotificationCatcher` 那条唤醒链路不可靠 ——
+   于是预算耗尽后没有任何路径再重置它。
+
+**为什么通知靠不住**：高德不是每次启动都发通知（只开地图、不进导航时很可能没有）。
+用户实测遇到过"重开了但没推送"。
+
+**参考实现的做法**（本项目的 AIDL 接口来自 [fw867/hypercar]
+(https://github.com/fw867/hypercar)，看 `AmapLinkProbe.kt` + `LinkBindingState.kt`）：
+
+```kotlin
+fun begin(): Long? {
+    if (closed || attempts >= 8) return null    // 8 次上限
+    ...
+}
+val retryDelayMillis: Long get() = (2000L * attempts.coerceAtLeast(1)).coerceAtMost(15_000)
+fun mapStarted() { if (!closed) attempts = 0 }   // ★ 用户拉起地图 → 重置预算
+fun registered(token: Long) { ...; attempts = 0 }
+```
+
+它**不解绑保活**，也是 `retire()`（unbind）后递增退避重绑；
+关键是 `start(context, mapStarted = true)` —— **应用自己拉起地图时显式重置预算**。
+
+**本项目对照改法**：
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 重试上限 | 10 次 | **8 次**（对齐 hypercar） |
+| 退避 | 固定 2s / 10s | **2s → 4s → … 封顶 15s**（合计约 72 秒） |
+| 预算重置入口 | `wakeUp()`（靠通知） | 再加 **`wakeUpFromMapLaunch()`**（用户点高德按钮）+ **`onResume` 补一次** |
+| 省电暂停 | 直接 return，静默死掉 | 标记 `pausedForPower`，**条件恢复时自动 `wakeUp()`** |
+| 高德按钮 | 已连接也排重连 | **已连接只跳转；未连接才重置预算并重绑** |
+
+> ⚠ 这里**没有引入任何轮询**。全部是事件驱动：
+> 用户点按钮、`onResume` 一次、车机连上、预览打开。
+> 这也是选择这条路而不是"定时探测高德进程"的原因（功耗）。
+
 ## 九、界面规范
 
 ### 9.1 主界面布局
