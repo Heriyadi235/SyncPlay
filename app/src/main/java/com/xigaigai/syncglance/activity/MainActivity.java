@@ -117,6 +117,44 @@ public class MainActivity extends AppCompatActivity {
             }
         });
         findViewById(R.id.btnNavMode).setOnClickListener(v -> toggleNavMode());
+
+        /*
+         * 「刷新连接状态」：只探活 + 更新显示，不动连接。
+         *
+         * 用 binder 主动探测（isBinderAlive + pingBinder），不是等回调 ——
+         * 高德被 force-stop 时系统不一定回调，registered 会是假的 true。
+         */
+        findViewById(R.id.btnProbeNav).setOnClickListener(v -> {
+            AmapLinkClient amap = AmapLinkClient.get(this);
+            if (!amap.isRegistered()) {
+                toast("高德未连接：" + amap.displayStatus());
+                refreshState();
+                return;
+            }
+            boolean alive = amap.isLinkAlive();
+            toast(alive ? "连接有效（binder 正常）" : "⚠ 连接已失效（高德可能被关闭）");
+            Log2.i("UI", "手动刷新连接状态 → " + (alive ? "有效" : "失效"));
+            refreshState();
+        });
+
+        /*
+         * 「重新连接」：探活，死了就重置预算重绑。
+         *
+         * 与「刷新连接状态」的区别：这个会**真的动手**。用于高德被关掉、
+         * 自动重试预算又已经耗尽的场景 —— 手动满血复活。
+         */
+        findViewById(R.id.btnReconnectNav).setOnClickListener(v -> {
+            AmapLinkClient amap = AmapLinkClient.get(this);
+            if (amap.isRegistered() && amap.isLinkAlive()) {
+                Log2.i("UI", "手动重新连接 → 连接正常，跳过");
+                toast("连接正常，无需重连");
+                return;
+            }
+            toast("正在重新连接高德…");
+            Log2.i("UI", "手动重新连接 AmapLink（连接已失效或未连接）");
+            amap.wakeUpFromMapLaunch();
+            refreshState();
+        });
         findViewById(R.id.btnKeyMap).setOnClickListener(v -> showKeyMapDialog());
         findViewById(R.id.btnPermCheck).setOnClickListener(v -> checkAllPermissions());
         findViewById(R.id.btnReset).setOnClickListener(v -> {

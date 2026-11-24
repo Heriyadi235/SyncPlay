@@ -294,6 +294,20 @@ public class StateRenderer {
                         if (clockNeedsRefresh != null) {
                             try { clockNeedsRefresh.run(); } catch (Exception ignored) { }
                         }
+                        /*
+                         * ★ 事件②：导航数据过期时顺手探一次 AmapLink。
+                         *
+                         *   数据断了有两种可能：
+                         *     a) 高德还在，只是导航结束/退出了  → binder 活着
+                         *     b) 高德进程被关掉了                → binder 已死
+                         *   后者不做任何事的话就再也回不来了（系统不一定回调）。
+                         *
+                         *   这里只探一次、死了才重绑 —— 不引入任何定时器，
+                         *   因为 staleWatchdog 本来就在跑（且只在有导航数据时跑）。
+                         */
+                        if (amapProbe != null) {
+                            try { amapProbe.run(); } catch (Exception ignored) { }
+                        }
                         // 强制重绘 —— 不能依赖下次事件
                         dirty = true;
                         schedule();
@@ -337,6 +351,27 @@ public class StateRenderer {
 
     public void setClockRefreshListener(Runnable r) {
         this.clockNeedsRefresh = r;
+    }
+
+    /**
+     * 「导航数据过期了，顺手探一下 AmapLink」的回调，由 {@code SyncPlayCore} 注入。
+     *
+     * <p>导航断流有两种：导航正常结束（binder 还活着）、高德被关掉（binder 已死）。
+     * 后者如果不处理就再也回不来了 —— 系统不保证回调 onServiceDisconnected。
+     * 这里挂一个探活 + 必要时的重绑，复用本类已有的 staleWatchdog，
+     * **不新增任何定时器**。</p>
+     */
+    private Runnable amapProbe;
+
+    public void setAmapProbeListener(Runnable r) {
+        this.amapProbe = r;
+    }
+
+    /** 同样的探活，但由用户手动触发（「刷新连接状态」按钮） */
+    public void probeAmapNow() {
+        if (amapProbe != null) {
+            try { amapProbe.run(); } catch (Exception ignored) { }
+        }
     }
 
     public void setNavigation(Navigation n) {

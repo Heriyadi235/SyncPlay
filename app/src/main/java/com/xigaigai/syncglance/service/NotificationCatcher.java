@@ -191,10 +191,24 @@ public class NotificationCatcher extends NotificationListenerService {
             logOneLine(sbn, isNav ? "导航" : "音乐");
         }
 
-        // ★ 高德发通知 = 它启动了，触发一次 AmapLink 连接尝试
+        // ★ 高德发通知 = 它活着并在工作 —— 顺手探一下连接是否还有效
+        //
+        //   为什么不只依赖回调：高德被 force-stop 时系统不保证回调
+        //   onServiceDisconnected/onBindingDied，registered 会"假活"，
+        //   界面就会一直显示已连接、按钮也不肯重连。
+        //   这里用 binder 主动探活（isBinderAlive 零 IPC + pingBinder 更严格），
+        //   发现已死就重建。见 docs/development.md 8.28。
+        //
+        //   只在「收到高德通知」这个事件上做，不做轮询。
         if ("com.autonavi.minimap".equals(pkg)) {
             try {
-                com.xigaigai.syncglance.nav.AmapLinkClient.get(this).wakeUp();
+                com.xigaigai.syncglance.nav.AmapLinkClient amap =
+                        com.xigaigai.syncglance.nav.AmapLinkClient.get(this);
+                if (amap.isRegistered()) {
+                    amap.probe(true);      // 探活；死了他自己会重绑
+                } else {
+                    amap.wakeUp();         // 没连上：这次通知就是"高德启动了"的信号
+                }
             } catch (Exception e) {
                 Log2.w(TAG, "触发 AmapLink 失败: " + e.getMessage());
             }

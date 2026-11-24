@@ -112,6 +112,10 @@ public final class SyncPlayCore {
              */
             renderer.setClockRefreshListener(this::pushClock);
 
+            // 导航数据过期时顺手探一次 AmapLink：binder 死了就重绑
+            // （高德被关闭时系统不保证回调，只能靠这里兜住）
+            renderer.setAmapProbeListener(() -> com.xigaigai.syncglance.nav.AmapLinkClient.probeAndReconnect());
+
             // 数据源：音乐通知 + 高德导航
             NotificationCatcher.setMusicListener(musicListener);
             AmapLinkClient.setNavListener(navListener);

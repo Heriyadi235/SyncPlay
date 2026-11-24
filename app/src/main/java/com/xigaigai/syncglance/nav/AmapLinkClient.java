@@ -207,16 +207,124 @@ public class AmapLinkClient {
         return "未连接（尝试 " + attempts + "/" + MAX_ATTEMPTS + "）";
     }
 
+    // ---------------- 主动探测 ----------------
+
+    /**
+     * 主动探测：连接是否<b>真的</b>还活着。
+     *
+     * <h3>为什么必须主动探，不能等回调</h3>
+     * 高德被 force-stop / 从最近任务划掉时，系统<b>不保证</b>回调
+     * {@code onServiceDisconnected} 或 {@code onBindingDied} ——
+     * 实车日志里高德被杀掉后一条回调都没有（见 docs/development.md 8.28）。
+     * 只靠回调判断，{@code registered} 会永远停在 true，界面一直显示"已连接"。
+     *
+     * <h3>为什么 IBinder 能答</h3>
+     * binder 驱动层自己维护对端进程的生死。对端一死，本地 binder 对象立刻被标记为
+     * 死亡状态，{@link IBinder#isBinderAlive()} 立即返回 false ——
+     * <b>纯本地查询，不唤醒高德、不产生 IPC</b>。
+     *
+     * <p>{@link IBinder#pingBinder()} 会再发一次空事务，能覆盖
+     * "进程活着但服务异常" 的情况，代价是一次极轻的 IPC。
+     * 所以这里先 isBinderAlive（零成本），为真再 ping（更严格）。</p>
+     *
+     * @return true = 连接仍然有效
+     */
+    public boolean isLinkAlive() {
+        Attempt a = current;
+        if (!registered || a == null) return false;
+        IBinder b = a.remote;
+        if (b == null) return false;
+        try {
+            // ① 零成本：binder 驱动层的本地状态
+            if (!b.isBinderAlive()) return false;
+            // ② 更严格：真发一次空事务，覆盖"进程在、服务异常"
+            return b.pingBinder();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 在「可能出事」的事件点调用：探一下，死了就重建，活着就什么都不做。
+     *
+     * <h3>只在这些事件点调用，不做轮询</h3>
+     * <ul>
+     *   <li>收到高德的「导航中」通知（说明它活着并在工作）</li>
+     *   <li>导航数据超过 8 秒没更新（{@code StateRenderer.staleWatchdog}）</li>
+     *   <li>用户点「刷新连接状态」/「重新连接」按钮</li>
+     * </ul>
+     *
+     * @param reconnectIfDead true = 发现已死就重置预算重绑；false = 只探测不动连接
+     * @return 探测结果（true = 连接有效）
+     */
+    public boolean probe(boolean reconnectIfDead) {
+        if (!registered) {
+            // 压根没连上，交给正常的重试链路；这里不掺和
+            return false;
+        }
+        boolean alive = isLinkAlive();
+        if (!alive) {
+            Log2.w(TAG, "⚠ 主动探测发现连接已死（binder 不可用），高德可能被关闭");
+            if (reconnectIfDead) {
+                // 把假活的 registered 清掉，否则 wakeUp 会以为"已连接"直接返回
+                releaseDeadBinding();
+                wakeUpFromMapLaunch();
+            }
+        }
+        return alive;
+    }
+
+    /**
+     * 静态便捷入口：探活，死了就重绑。供 `SyncPlayCore` 之类拿不到实例的地方调用。
+     *
+     * @return 连接是否有效
+     */
+    public static boolean probeAndReconnect() {
+        AmapLinkClient inst = instance;
+        if (inst == null) return false;
+        return inst.probe(true);
+    }
+
+    /**
+     * 清掉已经死掉的绑定状态。
+     *
+     * <p>不能只置 {@code registered = false} —— 旧的 {@code Attempt} 还占着
+     * {@code current}，会导致 {@code bind()} 里的 {@code if (current != null) return}
+     * 永远挡住新连接。必须 retire 掉。</p>
+     */
+    private void releaseDeadBinding() {
+        Attempt old;
+        synchronized (this) {
+            old = current;
+            current = null;
+            registered = false;
+            authenticated = false;
+        }
+        if (old != null) old.retire();
+    }
+
     /**
      * 主界面「导航」那一行显示的状态。
      *
      *   已连接（导航中）—— 连上了且有导航数据
      *   已连接           —— 连上了但还没开始导航
-     *   尝试重连中 (n/50) —— 正在重试
-     *   高德地图未启动   —— 试完 50 次都没连上
+     *   连接已失效       —— 高德进程没了（主动探测发现的）
+     *   尝试重连中 (n/8) —— 正在重试
+     *   高德地图未启动   —— 试满次数都没连上
      */
     public String displayStatus() {
         if (registered) {
+            /*
+             * ★ 这里要做一次探活。
+             *
+             *   高德被 force-stop 时系统不一定回调，registered 会是**假的 true** ——
+             *   以前这里直接返回"已连接（导航中）"，界面就一直在骗人
+             *   （实车日志：高德杀掉后主界面仍显示导航中，见 docs/development.md 8.28）。
+             *
+             *   探活是纯本地的 binder 状态查询，不唤醒高德、不产生 IPC，
+             *   而 displayStatus() 只在界面刷新时调用（页面可见时才跑），开销可忽略。
+             */
+            if (!isLinkAlive()) return "⚠ 连接已失效";
             return nav.hasData() ? "已连接（导航中）" : "已连接";
         }
         if (current != null) {
@@ -229,6 +337,16 @@ public class AmapLinkClient {
             return "尝试重连中 (" + attempts + "/" + MAX_ATTEMPTS + ")";
         }
         return "未连接";
+    }
+
+    /**
+     * 是否处于「已连接且确实有效」的状态。
+     *
+     * <p>⚠ 这不是 {@code registered} 的别名：高德被强制关闭时系统不一定回调，
+     * {@code registered} 可能是<b>假的 true</b>。所以加一道 binder 探活。</p>
+     */
+    public boolean isConnected() {
+        return registered && isLinkAlive();
     }
 
     public boolean isRegistered() { return registered; }
@@ -346,7 +464,24 @@ public class AmapLinkClient {
     private void wakeUp(boolean force) {
         Attempt old = null;
         synchronized (this) {
-            if (registered && !force) return;   // 已连接，静默返回（通知触发时会很频繁）
+            /*
+             * ★ 用 isLinkAlive() 而不是 registered 判断"已连接"。
+             *
+             *   registered 可能是**假的 true** —— 高德被强制关闭时系统
+             *   不一定回调 onServiceDisconnected，标志就一直挂着。
+             *   只看 registered 会导致 wakeUp 永远静默返回，
+             *   界面显示"已连接不再重连"（实车踩过，见 docs/development.md 8.28）。
+             */
+            if (registered && !force && isLinkAlive()) {
+                return;                          // 真的活着，静默返回（通知触发会很频繁）
+            }
+            if (registered && !isLinkAlive()) {
+                Log2.w(TAG, "registered=true 但 binder 已死，按未连接处理");
+                old = current;
+                current = null;
+                registered = false;
+                authenticated = false;
+            }
             if (closed) {
                 Log2.i(TAG, "服务已关闭，重新启动");
                 closed = false;

@@ -221,5 +221,30 @@
                 android:textSize="13sp" />
         </LinearLayout>
 
+        <!-- 高德连接的手动干预。两个按钮的区别：
+             刷新连接状态 = 只探活 + 更新显示，不动连接
+             重新连接     = 探活，死了就重置预算重绑 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnProbeNav"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="刷新连接状态"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnReconnectNav"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="重新连接"
+                android:textSize="13sp" />
+        </LinearLayout>
+
     </LinearLayout>
 </ScrollView>
