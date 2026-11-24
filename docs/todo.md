@@ -48,16 +48,47 @@
 
 ### A · 生命周期
 
-#### A1 · 按官方 Must 用 PendingIntent 启动 `SdlService` —— ✅ 已落地（2026-11-22 晚）
+#### A1 · 按官方 Must 用 PendingIntent 启动 `SdlService` —— ⛔ 结论：**库侧无法落实**（2026-11-24 实车证死）
 
-> 用户要求「强迫症般对齐官方实现」。本项已实现，**只剩上车复验**。
+> 用户要求「强迫症般对齐官方实现」。代码已尽力（intent-filter + 双路），
+> 但实车日志证明**官方那条路在本库版本上走不通**，只能靠兜底。
 
 **做了什么**：
 
 1. `AndroidManifest.xml`：给 `SdlService` 加 `<intent-filter>`
-   声明 `sdl.router.startservice` —— 让 Router 那个 PendingIntent 能解析到它
-2. `SdlReceiver.onSdlEnabled`：恢复**双路** —— 先 `startViaPendingIntent()`，
+   声明 `sdl.router.startservice`
+2. `SdlReceiver.onSdlEnabled`：**双路** —— 先 `startViaPendingIntent()`，
    再 `startSelf()` 兜底
+
+**为什么最终走不通（2026-11-24 23:17 实车日志）**：
+
+```
+23:17:45.554  已通过 PendingIntent 启动 SdlService（官方 Android 12+ 路径）   ← send() 返回成功
+23:17:45.570  已直接启动 SdlService（startForegroundService）
+23:17:45.578  SyncPlay 服务创建
+23:17:45.597  服务启动来源: startSelf（兜底路径）      ← 只有一条！说明 PendingIntent 没到服务
+```
+
+`onStartCommand` **只被调用了一次**，来源是 `startSelf`。即：
+PendingIntent 那条 `send()` 之后**什么都没启动**。
+
+根因（推翻了原先"fillIn 会补 action"的假设）：
+
+- 库建的 PendingIntent 目标 Intent 只有 `setPackage(包名)`，**无 component、无 action**
+- `PendingIntent.send(ctx, 0, fillInIntent)` 的 fillIn **不会**把广播的 action 补进去
+  （本机再验证：加完 intent-filter 后，「只有 package」的 `am start-foreground-service`
+  依然无效）
+- 于是 system_server 解析不到任何 service → `not found`，且该异常**不回传**
+  → 发送方拿不到失败信号，只能靠兜底
+
+**结论**：这条官方 **Must** 在 `sdl_android 5.8.0` 上对 `SdlService` **无法落实**，
+不是我们不做。`intent-filter` 保留无害（将来若库改了 Intent 里有 action，就能生效），
+兜底路径继续用。
+
+**还剩的唯一可选升级**（收益存疑，未做）：自建
+`PendingIntent.getForegroundService(ctx, 0, Intent(ctx, SdlService.class), flags)`
+—— 能指名服务，但**失去官方说的豁免意义**（豁免来自「由 Router 这个前台服务创建它」），
+只是把 `startForegroundService` 包了一层。
 
 **为什么之前走不通 → 怎么查明的**：
 
@@ -278,18 +309,10 @@ OnLockScreenStatus { showLockScreen: REQUIRED, driverDistraction: true, hmiLevel
 - [x] **没有** `Unable to start service ... : not found`
 - [x] **没有** `ForegroundServiceStartNotAllowedException` / `★ 启动 SdlService 失败`
 - [x] 三轮都 `★ 进入 FULL`
-- [ ] ⚠ 双路都在 5ms 内触发，日志里 `服务创建` 出现在 `startSelf` 之后 4~6ms，
-      **仍无法确认是哪条路真正拉起了服务**。
-      → **已加诊断日志**（2026-11-22 晚）：`startSelf()` 的 Intent 带
-      `start_from_self=true`，`SdlService.onStartCommand` 打出
-
-      ```
-      [SyncPlay] 服务启动来源: PendingIntent（官方 Android 12+ 路径）
-      [SyncPlay] 服务启动来源: startSelf（兜底路径）
-      [SyncPlay] 服务启动来源: 系统重启（intent=null）
-      ```
-
-      **下次上车只要日志里出现一次「PendingIntent（官方 Android 12+ 路径）」，就证明官方那条真的到了服务。**
+- [x] ⚠ 双路都在 5ms 内触发，日志里 `服务创建` 出现在 `startSelf` 之后 4~6ms，
+      **已用诊断日志证死**（2026-11-24 23:17）：`onStartCommand` 只被调一次，
+      来源是 `startSelf（兜底路径）` → **PendingIntent 那条实际没拉起服务**。
+      详细分析见 A1。诊断日志保留在代码里（`服务启动来源: …`），以后换库版本可复查。
 
 **T2 · 通知外观 —— ✅ 用户确认「通知没有问题」**
 
