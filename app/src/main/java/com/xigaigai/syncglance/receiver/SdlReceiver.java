@@ -1,6 +1,5 @@
 package com.xigaigai.syncglance.receiver;
 
-import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
@@ -62,7 +61,7 @@ public class SdlReceiver extends SdlBroadcastReceiver {
     /**
      * 车机已经连上 RouterService，把 SDL 服务拉起来建 proxy。
      *
-     * <h3>为什么只走自己 start 这一条（历史教训）</h3>
+     * <h3>为什么只走自己 start 这一条</h3>
      *
      * 官方 Integration Basics 给的写法是「有 PendingIntent 就发它，否则自己 start」。
      * 我们照抄后出过事（2026-11-21 实车日志）：
@@ -70,21 +69,18 @@ public class SdlReceiver extends SdlBroadcastReceiver {
      * <pre>
      *   12:49:37.867  [SdlReceiver] ★ onSdlEnabled —— 车机已连通 RouterService
      *   12:49:37.873  [SdlReceiver] 已通过 PendingIntent 启动 SdlService
-     *   （之后没有任何 [SYNC] SyncPlay 服务创建）
-     *   ★ 上面的 [SYNC] 是当时的日志 TAG，2026-11-21 起已改名 [SyncPlay]
-     *     （SYNC 是车机的设备名，容易看混）。
+     *   （之后没有任何服务创建日志）
      *   12:50:11.415  [Boot] ACL_DISCONNECTED      ← 车机等不及，超时
      * </pre>
      *
-     * {@code pendingIntent.send()} 返回成功（没抛 CanceledException），但它启动的
-     * <b>不是我们的 SdlService</b>（onCreate 压根没执行），而代码又提前 return 了，
-     * 把可靠的那条路跳过 —— 车机连上 Router 后没人完成 RAI，最后超时。
+     * {@code pendingIntent.send()} 返回成功（没抛 CanceledException），但服务压根没起来
+     * —— 而代码当时提前 return 了，把可靠的那条路跳过，车机连上 Router 后没人完成 RAI。
      *
-     * <p>此后一度改成「两条都走」。2026-11-22 移除前台通知时把
-     * {@code PendingIntent} 那条删掉了：Router 给的是一个
-     * {@code PendingIntent.getForegroundService(...)}，用它启动会落回
-     * 「5 秒内必须 startForeground」的契约，与「不再持有通知」直接冲突，
-     * 而且它历史上就没真正拉起过 SdlService。剩下的这条是实测可靠的那条。</p>
+     * <p><b>2026-11-24 定案</b>：那条路是**结构性地走不通**，不是偶发。库建的
+     * PendingIntent 目标 Intent 只有 {@code setPackage(包名)}（无 component、无 action），
+     * {@code send()} 的 fillIn 也不会补 action → 系统解析不到 service，且失败不回传给
+     * 发送方。验证过程见下面 {@link #startSelf} 上方那段注释。
+     * 所以 PendingIntent 路径**已整条删除**（含为它加的 intent-filter）。</p>
      *
      * <p>Service 重复启动是幂等的：{@code onStartCommand} 里 needRebuild() 会判断
      * 「已连接就复用」，不会重复建 SdlManager。</p>
@@ -134,16 +130,22 @@ public class SdlReceiver extends SdlBroadcastReceiver {
             }
         }
 
-        // ① 官方 Android 12+ 路径：先发 Router 递来的 PendingIntent
-        startViaPendingIntent(context, intent);
-
         /*
-         * ② 自己 start 作为兜底 —— **不能省**。
+         * 启动 SdlService。
          *
-         *   `PendingIntent.send()` 解析失败是**静默**的：system_server 里报
-         *   `Unable to start service ... : not found`，但**不会**回传给发送方，
-         *   所以这里根本拿不到"成功/失败"。2026-11-22 白天就是这样踩过：
-         *   send() 返回正常，`SdlService.onCreate` 却从没执行。
+         * ★ 2026-11-24：**删掉了官方的 PendingIntent 路径**，只走自己 start。
+         *
+         *   官方 Android 12+ 的 Must 是「发 Router 递来的 PendingIntent」，但实测
+         *   那条路**永远走不通**：库建的 PendingIntent 目标 Intent 只有
+         *   `setPackage(包名)`，既没有 component 也没有 action；`send(ctx, 0, 广播Intent)`
+         *   的 fillIn 也**不会**把广播的 action 补进去。于是 system_server 解析不到
+         *   任何 service（`not able to start service ... : not found`），而且这个失败
+         *   **不回传给发送方** —— 我们只看到 send() 没抛异常，服务压根没起来。
+         *
+         *   判定证据（2026-11-24 两轮实车 + 本机三组对照实验）：
+         *   每轮日志都只有一条 `服务启动来源: startSelf（兜底路径）`，
+         *   `onStartCommand` 只被调用一次。详见
+         *   docs/sdl生命周期-场景对照.md 第 19 条 与 docs/todo.md A1。
          *
          *   Service 重复启动是幂等的：`onStartCommand` 里 `needRebuild()` 会判断
          *   「已连接就复用」，不会重复建 SdlManager。
@@ -151,50 +153,21 @@ public class SdlReceiver extends SdlBroadcastReceiver {
         startSelf(context, intent);
     }
 
-    /**
-     * 官方 Android 12+ 推荐路径：发 Router 递来的 PendingIntent 来启动服务。
-     *
-     * <h3>为什么它能工作（2026-11-22 查实）</h3>
-     * Router 建的 PendingIntent 目标 Intent 只有 `setPackage(包名)`，没有 component；
-     * `send()` 时 fillIn 会把广播的 action（`sdl.router.startservice`）补进去，
-     * 于是实际执行的是
-     * `startForegroundService(Intent { act=sdl.router.startservice pkg=... })`。
-     *
-     * <p>这属于「隐式服务 Intent」，但 Android 5+ 的「服务必须显式」检查接受
-     * `setPackage`，所以它是**合法的**；之前失败纯粹是因为**没有任何 service
-     * 声明这个 action**（那个 action 只挂在 `SdlReceiver` 这个 receiver 上）。</p>
-     *
-     * <p>现在 `SdlService` 在 Manifest 里声明了同名 intent-filter，它就能被解析到 ——
-     * 这才是官方 Must 真正落实的地方（保留「由 Router 前台服务创建 PendingIntent」
-     * 带来的 FGS 启动豁免语义）。</p>
-     *
-     * @return true = PendingIntent 已发出（**不代表服务一定起来了**，见上面 ② 的说明）
-     */
-    private boolean startViaPendingIntent(Context context, Intent intent) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false;   // API 31+
-        if (intent == null) return false;
-
-        Object extra;
-        try {
-            extra = intent.getParcelableExtra(TransportConstants.PENDING_INTENT_EXTRA);
-        } catch (Exception e) {
-            return false;
-        }
-        if (!(extra instanceof PendingIntent)) return false;
-
-        try {
-            ((PendingIntent) extra).send(context, 0, intent);
-            Log2.i(TAG, "已通过 PendingIntent 启动 SdlService（官方 Android 12+ 路径）");
-            return true;
-        } catch (PendingIntent.CanceledException e) {
-            Log2.w(TAG, "PendingIntent 已失效（CanceledException），走 startSelf 兜底");
-            return false;
-        } catch (Exception e) {
-            Log2.w(TAG, "PendingIntent.send 失败（" + e.getClass().getSimpleName()
-                    + "），走 startSelf 兜底");
-            return false;
-        }
-    }
+    // 2026-11-24：`startViaPendingIntent()` 已删除。
+    //
+    // 官方 Android 12+ 的 Must 是「发 Router 递来的 PendingIntent 启动服务」，
+    // 但那条路在本库版本（sdl_android 5.8.0）上**永远走不通**：
+    //   · 库建的 PendingIntent 目标 Intent 只有 setPackage(包名)，无 component、无 action
+    //   · send(ctx, 0, 广播Intent) 的 fillIn **不会**补上 action
+    //   · → system_server 报 "not able to start service ... : not found"，
+    //     且该失败**不回传**给发送方（send 不抛异常）→ 看着成功其实什么都没起
+    //
+    // 判定依据：2026-11-24 两轮实车日志每轮都只有一条
+    // `服务启动来源: startSelf（兜底路径）`；本机三组 am 对照实验也证实了上面的机制。
+    // 完整记录见 docs/sdl生命周期-场景对照.md 第 19 条 与 docs/todo.md A1。
+    //
+    // 为了那条路加的 `<intent-filter>sdl.router.startservice</intent-filter>` 也一并撤了
+    // （服务启动只走显式组件，不需要它）。
 
     /**
      * 拉起 SdlService。
@@ -227,12 +200,6 @@ public class SdlReceiver extends SdlBroadcastReceiver {
                 i.putExtras(intent);
                 i.setAction(intent.getAction());
             }
-            /*
-             * 诊断标记：让 SdlService 能区分「这条启动是兜底路径发起的」。
-             * 不带它 = 走的是 Router 递来的 PendingIntent（官方路径）。
-             * 必须放在 putExtras(intent) 之后，免得被广播的 extras 覆盖。
-             */
-            i.putExtra(SdlService.EXTRA_START_FROM_SELF, true);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(i);
             } else {

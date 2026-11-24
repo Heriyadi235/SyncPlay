@@ -48,17 +48,17 @@
 
 ### A · 生命周期
 
-#### A1 · 按官方 Must 用 PendingIntent 启动 `SdlService` —— ⛔ 结论：**库侧无法落实**（2026-11-24 实车证死）
+#### A1 · 按官方 Must 用 PendingIntent 启动 `SdlService` —— ⛔ 已放弃并删除代码（2026-11-24）
 
-> 用户要求「强迫症般对齐官方实现」。代码已尽力（intent-filter + 双路），
-> 但实车日志证明**官方那条路在本库版本上走不通**，只能靠兜底。
+> 用户要求「强迫症般对齐官方实现」，前后试了三次，实车证明**这条路在本库版本上
+> 结构性走不通**。相关代码（`startViaPendingIntent()` + 为它加的 intent-filter）
+> **已全部删除**，只保留 `startForegroundService` 一条路。
 
-**做了什么**：
+**曾经做了什么**（现已全部撤销）：
 
 1. `AndroidManifest.xml`：给 `SdlService` 加 `<intent-filter>`
    声明 `sdl.router.startservice`
-2. `SdlReceiver.onSdlEnabled`：**双路** —— 先 `startViaPendingIntent()`，
-   再 `startSelf()` 兜底
+2. `SdlReceiver.onSdlEnabled`：`PendingIntent` + `startSelf` 双路
 
 **为什么最终走不通（2026-11-24 23:17 实车日志）**：
 
@@ -82,13 +82,13 @@ PendingIntent 那条 `send()` 之后**什么都没启动**。
   → 发送方拿不到失败信号，只能靠兜底
 
 **结论**：这条官方 **Must** 在 `sdl_android 5.8.0` 上对 `SdlService` **无法落实**，
-不是我们不做。`intent-filter` 保留无害（将来若库改了 Intent 里有 action，就能生效），
-兜底路径继续用。
+不是我们不做。2026-11-24 已把 `startViaPendingIntent()` 与那个 intent-filter
+**全部删除**，只保留 `startForegroundService`。
 
-**还剩的唯一可选升级**（收益存疑，未做）：自建
+**如果哪天又想要这条保险**：唯一现实路径是**自建**
 `PendingIntent.getForegroundService(ctx, 0, Intent(ctx, SdlService.class), flags)`
-—— 能指名服务，但**失去官方说的豁免意义**（豁免来自「由 Router 这个前台服务创建它」），
-只是把 `startForegroundService` 包了一层。
+—— 但失去官方豁免语义（豁免来自「由 Router 这个前台服务创建它」），
+等于把 `startForegroundService` 包了一层，收益 ≈ 0。
 
 **为什么之前走不通 → 怎么查明的**：
 
@@ -108,11 +108,21 @@ PendingIntent 那条 `send()` 之后**什么都没启动**。
   结论：**不是「隐式 Intent 不合法」**（`setPackage` 就够，实验 2 证明），
   而是**没有 service 声明那个 action**（它只挂在 `SdlReceiver` 这个 receiver 上）。
 
-**修法（已落地）**：给 `SdlService` 加同名 intent-filter →
-本机实测同一条命令现在直接拉起 `SdlService`，且
-`isForeground=true foregroundNoti=Notification(channel=syncglance ...)`。
+**当时为什么会误判"已打通"**：实验 1 是**人为带上 action** 的形态
+（`-a sdl.router.startservice`），加了 intent-filter 后确实能拉起服务；
+但库真实发出的是**实验 3**（只有 package）→ 加 filter 也救不了。
 
-**验收（待上车）**：见本文「五、上车测试待确认项」的 T1~T6。
+**最终判定（2026-11-24 实车两轮，定向日志证死）**：
+
+```
+21:33:51.580  已通过 PendingIntent 启动 SdlService（…）   ← 只是 send() 没抛异常
+21:33:51.588  SyncPlay 服务创建
+21:33:51.599  服务启动来源: startSelf（兜底路径）          ← 唯一一次 onStartCommand
+```
+
+→ **代码已删除**，含 `startViaPendingIntent()`、那个 intent-filter、
+以及只为区分的 `EXTRA_START_FROM_SELF` 标记。
+启动来源日志简化成两种：`startSelf（SdlReceiver 拉起）` / `系统重启（intent=null）`。
 
 ---
 

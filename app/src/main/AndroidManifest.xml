@@ -86,28 +86,19 @@
         <!-- SDL 通信服务（前台服务）
              ★ exported 必须为 true（官方 Integration Basics - Java 明确要求）：
                RouterService / 系统可能从应用外部启动它，应用在后台时尤其需要。
-               Android 12+ 官方推荐走 PendingIntent（见 SdlReceiver.onSdlEnabled），
-               两种方式并存，exported=true 是兜底。
 
-             ★ intent-filter 是 2026-11-22 加的，为的是落实官方的 PendingIntent Must：
-               Router 递来的 PendingIntent，目标 Intent 是
-                 new Intent().setPackage(包名)        ← 没有 component
-               send() 时 fillIn 会把广播的 action（sdl.router.startservice）补进去，
-               而 startForegroundService 只按 **service** 的 intent-filter 解析。
-               以前本服务没有 filter → 系统报
-                 "Unable to start service Intent { act=sdl.router.startservice ... }: not found"
-               加了这个 filter 之后它才能被解析到。
-               （receiver 与 service 的解析空间互不影响，所以与 SdlReceiver 的同名
-                 action 不冲突 —— 实测见 docs/todo.md A1） -->
+             ★ 2026-11-24：**没有 intent-filter**。曾经为「官方 PendingIntent 路径」
+               加过 <action android:name="sdl.router.startservice"/>，后来查明那条路
+               根本走不通（库给的 PendingIntent 目标 Intent 只有 setPackage，
+               fillIn 也不补 action → 系统解析不到 service，且失败不回传），
+               整条路径已删除，filter 也随之撤掉。
+               现在只由 SdlReceiver 用显式组件 startForegroundService 拉起。
+               详见 docs/sdl生命周期-场景对照.md 第 19 条。 -->
         <service
             android:name=".service.SdlService"
             android:enabled="true"
             android:exported="true"
-            android:foregroundServiceType="connectedDevice">
-            <intent-filter>
-                <action android:name="sdl.router.startservice" />
-            </intent-filter>
-        </service>
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- ===== SDL 传输层 =====
              这两个是 SDL 官方标准集成，缺一不可：

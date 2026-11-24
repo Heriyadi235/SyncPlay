@@ -816,21 +816,26 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 | `SdlManager` 实例不可复用，断开后必须新建 | ✅ | 用「代际号」`generation` 忽略旧对象的迟到回调 |
 | `SdlReceiver extends SdlBroadcastReceiver`，`exported="true"`，监听 `ACL_CONNECTED` + `sdl.router.startservice` | ✅ | 缺 `sdl.router.startservice` 会让 `queryForConnectedService` 直接抛异常 |
 | `defineLocalSdlRouterClass()` 返回自己的 Router 子类 | ✅ `SdlRouterService` | |
-| **`onSdlEnabled` 启动服务要分版本** | ✅ 已落实（双路） | 先发 Router 递来的 PendingIntent（`SdlService` 已加 `sdl.router.startservice` 的 intent-filter 让它可被解析），再 `startSelf` 兜底。细节与实验见 [场景对照](sdl生命周期-场景对照.md) 注② |
+| **`onSdlEnabled` 启动服务要分版本** | ⛔ 已放弃（官方那条不好使） | 只走 `startForegroundService`。Router 递来的 PendingIntent 目标 Intent 只有 `setPackage`（无 component/action），fillIn 也不补 action → 解析不到 service 且失败不回传。2026-11-24 两轮实车定案，代码已删。见 [场景对照](sdl生命周期-场景对照.md) 注② |
 
 **两处曾漏掉、2026-11-21 补齐的**：
 
 1. `SdlService` 的 `exported` 从 `false` 改 `true` —— 应用在后台时，
    Router/系统从外部启动服务需要它可以被外部访问
-2. `onSdlEnabled` 补 PendingIntent 路径 —— 官方对 Android 12+ 的 Must
+2. ~~`onSdlEnabled` 补 PendingIntent 路径~~ —— **2026-11-24 最终删除**
 
-> **2026-11-22 的曲折**：第 2 条一度被撤回（当时 `send()` 后服务起不来），
-> 后来查明根因是**没有任何 service 声明 `sdl.router.startservice`**
-> —— 那个 action 只挂在 `SdlReceiver`（receiver）上，而 `startForegroundService`
-> 只按 service 的 intent-filter 解析，于是 system_server 报 `not found`
-> （且该异常不回传给发送方）。
-> 给 `SdlService` 加上同名 intent-filter 后已打通，本机实测通过；
-> 现在保留**双路**：PendingIntent 优先，`startSelf` 兜底。
+> **第 2 条的完整结局（三次反转，别再来一遍）**：
+> 1. 11-21 照官方 Must 加了 PendingIntent 路径 → 实车上 `send()` 成功但服务没起
+> 2. 11-22 一度认为是「没有 service 声明那个 action」，于是给 `SdlService` 加了
+>    `<intent-filter>sdl.router.startservice</intent-filter>` + 恢复双路
+> 3. **11-24 实车两轮定案**：加完 filter 依然只有 `startSelf` 那一条启动来源日志。
+>    真正原因是**库发出去的 Intent 里连 action 都没有**（只有 `setPackage`），
+>    `PendingIntent.send()` 的 fillIn 不会补 action → 解析不到 service，
+>    且失败不回传给发送方。
+>
+> 所以 PendingIntent 路径**已整条删除**（含那个 intent-filter），
+> 现在只走 `startForegroundService`。详见
+> [场景对照](sdl生命周期-场景对照.md) 注②。
 
 > 我们额外做、官方 Integration Basics 里没有的：通知监听（`NotificationCatcher`）、
 > 高德 AmapLink 解密、`SyncPlayCore` 把数据采集与连接层解耦。这些属于业务，不影响
