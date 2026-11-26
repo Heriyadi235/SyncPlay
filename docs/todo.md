@@ -340,6 +340,7 @@ OnLockScreenStatus { showLockScreen: REQUIRED, driverDistraction: true, hmiLevel
 **T6 · 回归 —— ✅**
 - 三轮全部进入 FULL，会话时长 92s / 230s / 18s
 - 中间的正常事件：`失去焦点（LIMITED）` 后重新 FULL、`导航数据已过期 8 秒` 降级
+  （注：该日志文案与阈值在 2026-11-28 已改，现为 10 秒 + 探活，见 development.md §8.28）
 - **无任何异常 / 崩溃**
 
 **本轮耗时数据**（与前几轮一致，没有退化）

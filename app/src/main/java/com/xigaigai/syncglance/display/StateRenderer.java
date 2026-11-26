@@ -343,11 +343,27 @@ public class StateRenderer {
     }
 
     /**
-     * 定时检查导航数据是否过期。
+     * 定时检查导航数据是否过期。每 {@link #STALE_CHECK_MS} 跑一次。
      *
-     * 高德正常每秒推一次，8 秒没更新基本可以判定导航已停止
-     * （闪退、退出导航、手机休眠等）。
-     * 每 2 秒检查一次，最坏情况 10 秒内完成降级。
+     * <h3>★ 为什么不能只看「多久没数据」（2026-11-28 修正）</h3>
+     * 高德的 1 秒一次是<b>最大刷新率</b>，不是心跳。车停着不动、或长时间匀速直行时，
+     * 剩余距离和转向都没变化，高德<b>根本不发数据</b>。早先按「8 秒没数据就降级」，
+     * 结果是停个红灯屏幕就闪回空闲，用户会以为导航自己退出了。
+     *
+     * <h3>现在的判定：探活 + 两段阈值</h3>
+     * <pre>
+     *   数据停 10 秒（STALE_MS）？
+     *     ├─ 否 → 什么都不做
+     *     └─ 是 → 探活 AmapLinkClient.isLinkAliveNow()
+     *              ├─ binder 已死（高德没了）    → 立即降级
+     *              ├─ 活着 + 已停 &lt; 180 秒       → 保持导航画面（停车/直行）
+     *              └─ 活着 + 已停 ≥ 180 秒       → 降级（导航真结束了但高德没退）
+     * </pre>
+     *
+     * <p>探活只在数据已经超时之后做，不是每次轮询都探；且
+     * {@code isBinderAlive()} 是纯本地查询，不唤醒高德、不产生 IPC。</p>
+     *
+     * <p>探活日志只在真正降级时打一条，保持画面时不打 —— 否则停车时每 2 秒一条。</p>
      */
     private static final long STALE_CHECK_MS = 2000;
     private final Runnable staleWatchdog = new Runnable() {
@@ -357,41 +373,69 @@ public class StateRenderer {
                 if (nav != null && nav.hasData()) {
                     long age = nav.staleAge();
                     if (age > 0) {
-                        Log2.w(TAG, "导航数据已过期 " + (age / 1000)
-                                + " 秒，自动降级到空闲/歌曲模式");
-                        nav.clear();
-                        navClockText = null;
-                        lastClockFingerprint = null;
                         /*
-                         * ★ 必须通知外部重推时钟。
+                         * 数据停了 10 秒 —— 先问一句「高德你还在吗」。
                          *
-                         *   这是「导航结束降级到空闲屏幕时时钟不消失」的直接原因：
-                         *   以前这里只 markDirty 重画界面，但时钟格是车机**自己维护**
-                         *   的 —— 不发新指令它就一直停在最后那个 ETA 读数上。
-                         *
-                         *   调 clockNeedsRefresh 让 SyncPlayCore 跑一次 pushClock()，
-                         *   它会因为「没导航 ETA、没有歌」而发出 CLEAR。
+                         * ★ 只探活、不重连：这里要的是判断，不是修复。
+                         *   真正的重连由下面的 amapProbe 在降级分支里负责。
                          */
-                        if (clockNeedsRefresh != null) {
-                            try { clockNeedsRefresh.run(); } catch (Exception ignored) { }
+                        boolean alive = com.xigaigai.syncglance.nav.AmapLinkClient
+                                .isLinkAliveNow();
+
+                        boolean giveUp;
+                        String why;
+                        if (!alive) {
+                            giveUp = true;
+                            why = "高德进程已不在（binder 已死）";
+                        } else if (age >= com.xigaigai.syncglance.model.Navigation.LONG_STALE_MS) {
+                            giveUp = true;
+                            why = "高德还活着，但数据已停 "
+                                    + (com.xigaigai.syncglance.model.Navigation.LONG_STALE_MS / 1000)
+                                    + " 秒，判定导航已结束";
+                        } else {
+                            // 高德活着、停得还不算久 —— 大概率只是车没动，保持画面
+                            giveUp = false;
+                            why = null;
                         }
-                        /*
-                         * ★ 事件②：导航数据过期时顺手探一次 AmapLink。
-                         *
-                         *   数据断了有两种可能：
-                         *     a) 高德还在，只是导航结束/退出了  → binder 活着
-                         *     b) 高德进程被关掉了                → binder 已死
-                         *   后者不做任何事的话就再也回不来了（系统不一定回调）。
-                         *
-                         *   这里只探一次、死了才重绑 —— 不引入任何定时器，
-                         *   因为 staleWatchdog 本来就在跑（且只在有导航数据时跑）。
-                         */
-                        if (amapProbe != null) {
-                            try { amapProbe.run(); } catch (Exception ignored) { }
+
+                        if (giveUp) {
+                            Log2.w(TAG, "导航数据已过期 " + (age / 1000)
+                                    + " 秒（" + why + "），自动降级到空闲/歌曲模式");
+                            nav.clear();
+                            navClockText = null;
+                            lastClockFingerprint = null;
+                            /*
+                             * ★ 必须通知外部重推时钟。
+                             *
+                             *   这是「导航结束降级到空闲屏幕时时钟不消失」的直接原因：
+                             *   以前这里只 markDirty 重画界面，但时钟格是车机**自己维护**
+                             *   的 —— 不发新指令它就一直停在最后那个 ETA 读数上。
+                             *
+                             *   调 clockNeedsRefresh 让 SyncPlayCore 跑一次 pushClock()，
+                             *   它会因为「没导航 ETA、没有歌」而发出 CLEAR。
+                             */
+                            if (clockNeedsRefresh != null) {
+                                try { clockNeedsRefresh.run(); } catch (Exception ignored) { }
+                            }
+                            /*
+                             * ★ 事件②：导航数据过期时顺手探一次 AmapLink。
+                             *
+                             *   数据断了有两种可能：
+                             *     a) 高德还在，只是导航结束/退出了  → binder 活着
+                             *     b) 高德进程被关掉了                → binder 已死
+                             *   后者不做任何事的话就再也回不来了（系统不一定回调）。
+                             *
+                             *   这里只探一次、死了才重绑 —— 不引入任何定时器，
+                             *   因为 staleWatchdog 本来就在跑（且只在有导航数据时跑）。
+                             */
+                            if (amapProbe != null) {
+                                try { amapProbe.run(); } catch (Exception ignored) { }
+                            }
+                            // 强制重绘 —— 不能依赖下次事件
+                            dirty = true;
+                            schedule();
                         }
-                        // 强制重绘 —— 不能依赖下次事件
-                        dirty = true;
-                        schedule();
+                        // giveUp == false：高德还活着但数据没变，屏幕保持原样，什么都不做
                     }
                 }
             } catch (Exception ignored) { }

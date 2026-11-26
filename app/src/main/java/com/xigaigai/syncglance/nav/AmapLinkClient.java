@@ -222,12 +222,15 @@ public class AmapLinkClient {
     /**
      * 在「可能出事」的事件点调用：探一下，死了就重建，活着就什么都不做。
      *
-     * <h3>只在这些事件点调用，不做轮询</h3>
+     * <h3>调用点</h3>
      * <ul>
      *   <li>收到高德的「导航中」通知（说明它活着并在工作）</li>
-     *   <li>导航数据超过 8 秒没更新（{@code StateRenderer.staleWatchdog}）</li>
      *   <li>用户点「重新连接」按钮</li>
      * </ul>
+     *
+     * <p>⚠️ 注意 {@code StateRenderer.staleWatchdog} 调的是
+     * {@link #isLinkAliveNow()}（只探活、不重连），不是这里 ——
+     * 那里是在判断「导航数据停了是高德没了还是车没动」，不能顺手触发重连。</p>
      *
      * @param reconnectIfDead true = 发现已死就重置预算重绑；false = 只探测不动连接
      * @return 探测结果（true = 连接有效）
@@ -258,6 +261,20 @@ public class AmapLinkClient {
         AmapLinkClient inst = instance;
         if (inst == null) return false;
         return inst.probe(true);
+    }
+
+    /**
+     * 静态便利入口：<b>只探活，不动连接</b>。供 {@code StateRenderer.staleWatchdog} 用 ——
+     * 那里需要判断「导航数据停了，是高德没了还是车没动」，不能顺手触发重连。
+     *
+     * <p>开销可忽略：{@link IBinder#isBinderAlive()} 是 binder 驱动层的本地状态查询，
+     * 不唤醒高德、不产生 IPC；只有它返回 true 才会再 ping 一次。</p>
+     *
+     * @return true = 连接仍然有效（高德进程活着）；false = 没连上或 binder 已死
+     */
+    public static boolean isLinkAliveNow() {
+        AmapLinkClient inst = instance;
+        return inst != null && inst.isLinkAlive();
     }
 
     /**

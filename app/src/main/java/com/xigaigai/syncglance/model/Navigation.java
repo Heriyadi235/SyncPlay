@@ -42,17 +42,37 @@ public class Navigation {
         cachedEtaAt = 0;
     }
 
-    /** 数据多久没更新就算失效（高德正常每秒推一次，8 秒没更新基本就是停了） */
-    public static final long STALE_MS = 8_000;
+    /**
+     * 数据多久没更新就"可能停了"（10 秒）。
+     *
+     * <p>★ <b>高德是按需推送，不是恒定心跳。</b>它的 1 秒一次只是<b>最大刷新率</b>；
+     * 车停着不动、或者长时间匀速直行时，剩余距离和转向都没变化，
+     * 高德压根不会发数据。所以「多久没数据」<b>不能</b>单独用来判定导航结束
+     * —— 否则停个红灯屏幕就闪回空闲，用户会以为导航自己退出了。</p>
+     *
+     * <p>这个阈值现在的含义是「该去探一次活了」的起点，真正的判定见
+     * {@code StateRenderer.staleWatchdog}（探活 + 本值与 {@link #LONG_STALE_MS} 两段）。</p>
+     */
+    public static final long STALE_MS = 10_000;
+
+    /**
+     * 硬兜底：数据停这么久（180 秒 = 3 分钟），即使高德进程还活着也判定导航结束。
+     *
+     * <p>兜的是一种探活查不出来的情况：导航已经结束、但高德进程并没有退出，
+     * binder 一直活着。只靠探活的话，屏幕会永远停在最后一条转向指令上。</p>
+     *
+     * <p>为什么是 3 分钟：够长，停车、堵车、长直路都不会被误判；
+     * 又够短，真的结束导航后不会留下太久。</p>
+     */
+    public static final long LONG_STALE_MS = 180_000;
 
     /**
      * 数据是否还新鲜。
      *
-     * 高德正常每秒推送一次，超过 8 秒没更新说明：
-     *   - 高德闪退了
-     *   - 导航结束了但没发 type 100
-     *   - 手机休眠了
-     * 这时候必须当作"没有导航数据"，否则车机会一直卡在最后一条指令上误导司机。
+     * <p>⚠️ 这里只做「时间」这一维的判断，<b>不知道</b>导航是不是真结束了
+     * —— 因为高德停了推送很可能只是车没动。真正决定降级的逻辑在
+     * {@code StateRenderer.staleWatchdog}：数据超 {@link #STALE_MS} 后先探活，
+     * binder 已死立即降级，binder 活着则要等满 {@link #LONG_STALE_MS}。</p>
      *
      * <p>★ 这里以前还有一条 {@code if (manualMode && lastUpdateMillis == 0) return true;}
      * ——那个 {@code manualMode}（老「导航模式」按钮）只在时间戳恰好为 0 时才起作用，
@@ -65,7 +85,7 @@ public class Navigation {
         return lastUpdateMillis > 0 && age >= 0 && age < STALE_MS;
     }
 
-    /** 数据已经过期多久（毫秒），没过期返回 -1 */
+    /** 数据已经过期多久（毫秒），没过 {@link #STALE_MS} 返回 -1 */
     public long staleAge() {
         if (!hasData() || lastUpdateMillis == 0) return -1;
         long age = System.currentTimeMillis() - lastUpdateMillis;
