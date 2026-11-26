@@ -689,6 +689,12 @@ public class SdlService extends Service {
                                 java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
                             sendRpcSequential(msgs);
                         }
+
+                        @Override
+                        public void sendWithAck(com.smartdevicelink.proxy.RPCMessage msg,
+                                                Runnable onDone) {
+                            sendRpcWithAck((RPCRequest) msg, onDone);
+                        }
                     });
             sdlManager.start();
             Log2.i(TAG, "✓ SdlManager 已启动，等待车机连上并完成注册"
@@ -748,21 +754,15 @@ public class SdlService extends Service {
         startProxy();
     }
 
-    // ---------------- 计时器状态（跨失焦保留）----------------
-
-    private String lastTimerMode;
-    private int lastTimerH, lastTimerM, lastTimerS;
-
-    /** 回 FULL 时如果计时器之前在跑，补发一次 */
-    private void resendTimerIfNeeded() {
-        if (!pendingTimerResend || lastTimerMode == null) return;
-        pendingTimerResend = false;
-        if ("CLEAR".equals(lastTimerMode) || "PAUSE".equals(lastTimerMode)) {
-            return;   // 已停的不用补
-        }
-        Log2.i(TAG, "补发计时器（失焦期间被车机终止）: " + lastTimerMode);
-        doTimer(lastTimerH, lastTimerM, lastTimerS, lastTimerMode);
-    }
+    /*
+     * 这里曾经有一套「失焦被车机终止后补发」的机制：
+     *   pendingTimerResend + lastTimerMode/H/M/S + resendTimerIfNeeded()。
+     *
+     * 已删除。它和 SyncPlayCore 里的 timerPendingSend、以及 StateRenderer 的
+     * 节流指纹三方互相兜底，谁也说不清算哪条路径生效；而且它对 PAUSE 直接跳过，
+     * 暂停态其实也需要补发（两步法定格）。现在补发只有一条路径：
+     * 回到 FULL 时 SyncPlayCore.pushClockForce() 按本地状态重算重投。
+     */
 
     // ---------------- 发送 ----------------
 
@@ -773,38 +773,57 @@ public class SdlService extends Service {
      * 非 FULL 时直接丢弃并记日志，避免抛 SdlException 刷屏。
      */
     public void sendRpc(RPCRequest req) {
+        sendRpcInternal(req, null);
+    }
+
+    /**
+     * 发一条，并在车机响应后回调。
+     *
+     * <p>{@link com.xigaigai.syncglance.display.ClockDispatcher} 用它把所有时钟指令
+     * 排成严格串行的一条线。回调必须<b>恰好一次</b> —— 没连 / 非 FULL / 抛异常这些
+     * "根本发不出去"的情况也要立刻回调，否则时钟队列会卡死，那一格再也不更新。</p>
+     */
+    public void sendRpcWithAck(RPCRequest req, Runnable onDone) {
+        sendRpcInternal(req, onDone);
+    }
+
+    private void sendRpcInternal(RPCRequest req, Runnable onDone) {
         if (sdlManager == null) {
             Log2.w(TAG, "✗ 未连接，丢弃 " + req.getFunctionName());
+            finish(onDone);
             return;
         }
         if (!lifecycle.canSendRpc()) {
             Log2.w(TAG, "✗ 当前 " + lifecycle.describe() + "，不能发 "
                     + req.getFunctionName() + "（需 HMI_FULL）");
+            finish(onDone);
             return;
         }
+        final java.util.concurrent.atomic.AtomicBoolean fired =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final Runnable once = () -> {
+            if (fired.compareAndSet(false, true)) finish(onDone);
+        };
         try {
             /*
              * ★ 5.x 没有全局的"响应回调"了（4.x 是一个巨长的 IProxyListenerALM 接口）。
-             *   为了保住原来的日志能力（看到每条 RPC 的结果码），
-             *   这里给每条请求挂一个通用 OnRPCResponseListener，
-             *   等价于 4.x 里的 onShowResponse / onSetMediaClockTimerResponse …
+             *   这里给每条请求挂一个通用 OnRPCResponseListener：
+             *     · 保住原来的日志能力（看到每条 RPC 的结果码）
+             *     · 同时作为时钟队列的"这一条发完了"信号
              */
             req.setOnRPCResponseListener(new OnRPCResponseListener() {
                 @Override
                 public void onResponse(int correlationId, RPCResponse response) {
-                    if (response == null) return;
-                    Log2.rawMsg("←", response);
-                    if (!response.getSuccess()) {
-                        Log2.w(TAG, response.getFunctionName() + " ← " + response.getResultCode()
-                                + (response.getInfo() == null ? "" : " " + response.getInfo()));
-
-                        /*
-                         * ⚠ 这里曾经调 renderer.onClockRpcFailed()，那是基于
-                         *   "分钟位有上限" 这个错误归因加的兜底。真实原因是
-                         *   「单步 PAUSE + startTime」无效，改成两步法后就不再需要，
-                         *   兜底逻辑已删除（见 AGENTS.md §6.6.1）。
-                         */
+                    if (response != null) {
+                        Log2.rawMsg("←", response);
+                        if (!response.getSuccess()) {
+                            Log2.w(TAG, response.getFunctionName() + " ← " + response.getResultCode()
+                                    + (response.getInfo() == null ? "" : " " + response.getInfo()));
+                            // 带 endTime 的歌曲正计时被拒 → 关掉该特性并重推（降级）
+                            onClockEndTimeRejected(req, response);
+                        }
                     }
+                    once.run();
                 }
             });
             sdlManager.sendRPC(req);
@@ -812,7 +831,31 @@ public class SdlService extends Service {
             logRawJson("→", req);
         } catch (Exception e) {
             Log2.e(TAG, "发送失败: " + req.getFunctionName(), e);
+            once.run();
         }
+    }
+
+    private static void finish(Runnable onDone) {
+        if (onDone != null) onDone.run();
+    }
+
+    /**
+     * 歌曲正计时带的 {@code endTime}（= 歌曲总时长）被车机拒了。
+     *
+     * <p>这条特性是「给播放时间一个终点」的实验：车机若不认 {@code endTime}
+     * 就会整条 {@code REJECTED}，那么连播放时间都不显示了 —— 所以必须降级：
+     * 关掉 endTime，把时钟重推一遍（这次不带它）。</p>
+     *
+     * @return true = 识别出这是 endTime 引起的失败
+     */
+    private boolean onClockEndTimeRejected(RPCRequest req, RPCResponse response) {
+        if (!(req instanceof SetMediaClockTimer)) return false;
+        SetMediaClockTimer t = (SetMediaClockTimer) req;
+        if (t.getEndTime() == null) return false;
+        Log2.w(TAG, "车机不接受 endTime（" + response.getResultCode()
+                + "），关闭「歌曲总时长」并重推时钟");
+        com.xigaigai.syncglance.core.SyncPlayCore.get().disableSongEndTime();
+        return true;
     }
 
     /**
@@ -888,18 +931,8 @@ public class SdlService extends Service {
      * 自己走表），跟连接没有必然关系；而本 Service 现在是「断开就 stopSelf」
      * （官方语义），平时根本不存在。挂在服务上的话，没连接时点按钮只会收到
      * "服务未启动"，连屏幕预览都看不到 —— 踩过。
-     *
-     * 这里保留 `lastTimer*` 与 `pendingTimerResend`，因为"失焦被车机终止后重发"
-     * 确实是连接层的事（见 {@link #resendTimerIfNeeded()}）。
      */
     public void doTimer(int h, int m, int s, String mode) {
-        // 记住参数，失焦被车机终止后回来能补发
-        lastTimerMode = mode;
-        lastTimerH = h;
-        lastTimerM = m;
-        lastTimerS = s;
-        pendingTimerResend = false;
-
         com.xigaigai.syncglance.core.SyncPlayCore.get().doTimer(h, m, s, mode);
     }
 
@@ -1269,16 +1302,11 @@ public class SdlService extends Service {
         // 2. 订阅按键
         subscribeAllKeys();
 
-        // 3. 补发计时器（如果失焦前在跑）
-        resendTimerIfNeeded();
-
-        // 3.5 补发「没连车机时设过的」计时器
-        //     （本地状态早已生效、预览也能看到，只差这一条 RPC）
-        com.xigaigai.syncglance.core.SyncPlayCore.get().resendTimerIfPending();
-
-        // 3.6 ★ 按当前状态强制重推一次时钟
-        //     覆盖：计时器在跑/暂停（按本地记录重算读数）、倒计时已到期（自动清除）、
-        //     以及导航 ETA / 播放时间。车机那边的格子刚被清空，节流会误判"不用发"。
+        // 3. ★ 按当前状态强制重推一次时钟
+        //     覆盖：计时器在跑 / 暂停（按本地记录重算读数）、倒计时已到期（保留 00:00）、
+        //     以及导航 ETA / 播放时间 / CLEAR。
+        //     车机那边的格子刚被清空，指纹会误判"不用发" —— 这里是<b>唯一</b>的补发路径
+        //     （App 没连车机时设的计时器、失焦期间被车机终止的计时器，都在这一步重投）。
         com.xigaigai.syncglance.core.SyncPlayCore.get().pushClockForce();
 
         // 4. 画初始界面
@@ -1293,12 +1321,9 @@ public class SdlService extends Service {
         menusBuilt = false;   // 下次回到 FULL 需要重建
         // 清掉显示缓存，回到 FULL 时强制重绘
         renderer.onDisconnected();
-        // 计时器状态在本地保留（车机侧的可能被终止，回 FULL 时补发）
-        pendingTimerResend = true;
+        // 计时器状态在本地保留 —— 车机侧的表会被 HMI 掉级终止，
+        // 回到 FULL 时由 pushClockForce() 按本地状态重投（不需要额外标记）
     }
-
-    /** 回 FULL 时需要补发计时器（失焦时车机会停掉它） */
-    private boolean pendingTimerResend = false;
 
 
     // ---------------- 通知回调（5.x 按 FunctionID 注册，替代 4.x 的巨型监听接口）----------------
@@ -1493,7 +1518,6 @@ public class SdlService extends Service {
         com.xigaigai.syncglance.nav.AmapLinkClient.setHeadUnitConnected(false);
         // 车机侧所有菜单/订阅都已被删除，重连要全量重建
         menusBuilt = false;
-        pendingTimerResend = true;
         renderer.onDisconnected();
         com.xigaigai.syncglance.core.SyncPlayCore.get().detachSender();
 

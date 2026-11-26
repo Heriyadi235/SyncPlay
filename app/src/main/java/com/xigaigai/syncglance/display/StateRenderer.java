@@ -76,6 +76,16 @@ public class StateRenderer {
          * PAUSE 可能比 COUNTUP 先到，就会停错表或者因为没有表在跑而被拒。</p>
          */
         void sendSequential(java.util.List<? extends RPCMessage> msgs);
+
+        /**
+         * 发一条，并在「车机响应回来（成功/失败都算）」之后回调 {@code onDone}。
+         *
+         * <p>由 {@link ClockDispatcher} 用来把<b>所有</b>时钟指令排成一条队列 ——
+         * 光靠 {@link #sendSequential} 不够：两次独立的时序序列（比如 ETA 的两步法
+         * 和计时器的两步法）并发发出时，它们的 COUNTUP/PAUSE 仍会交错。
+         * 实现方必须保证 {@code onDone} 最多被调用一次；没连车机时立即回调。</p>
+         */
+        void sendWithAck(RPCMessage msg, Runnable onDone);
     }
 
     private Sender sender;
@@ -889,10 +899,20 @@ public class StateRenderer {
     /**
      * 歌曲正计时是否带 {@code endTime = 歌曲总时长}。
      *
-     * <p>默认关，等实车确认车机接受后再打开（第 3 批会打开）。
-     * 带 endTime 的版本被拒时由 {@code ClockDispatcher} 降级重发，见其注释。</p>
+     * <p>默认关，第 3 批接上 UI 后打开。车机若不接受 {@code endTime} 会整条被拒，
+     * 所以 {@code SdlService} 收到拒绝时会调用 {@link #setSongEndTimeEnabled(false)}
+     * 并重推一次 —— 这条特性不允许"赌一把失败就什么都不显示"。</p>
      */
     private volatile boolean songEndTimeEnabled = false;
+
+    /** 打开 / 关闭「歌曲正计时带 endTime = 总时长」 */
+    public void setSongEndTimeEnabled(boolean on) {
+        if (songEndTimeEnabled == on) return;
+        songEndTimeEnabled = on;
+        // 指令内容变了，指纹必须作废，否则不会重发
+        lastClockFingerprint = null;
+        Log2.i(TAG, "歌曲 endTime（总时长）" + (on ? "已启用" : "已禁用"));
+    }
 
     /**
      * 同一条指令就沿用原来的 issuedAtMs —— 否则每次重建帧都会把走表起点重置到 0，

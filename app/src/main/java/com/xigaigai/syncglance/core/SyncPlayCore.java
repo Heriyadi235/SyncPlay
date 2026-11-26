@@ -3,6 +3,7 @@ package com.xigaigai.syncglance.core;
 import android.content.Context;
 
 import com.smartdevicelink.proxy.rpc.SetMediaClockTimer;
+import com.xigaigai.syncglance.display.ClockDispatcher;
 import com.xigaigai.syncglance.display.StateRenderer;
 import com.xigaigai.syncglance.display.SyncLifecycle;
 import com.xigaigai.syncglance.lyric.Lrc;
@@ -64,6 +65,16 @@ public final class SyncPlayCore {
      */
     private volatile StateRenderer.Sender sender;
 
+    /**
+     * 时钟指令的<b>唯一</b>发送队列。
+     *
+     * <p>所有 {@code SetMediaClockTimer} 都从这里出去：单 in-flight、严格按序、
+     * 新批次覆盖排队中的旧批次。没有它，两次独立的两步法可能交错成
+     * {@code COUNTUP(ETA) → COUNTUP(timer) → PAUSE → PAUSE}，定格读数就错了。
+     * 见 {@link ClockDispatcher}。</p>
+     */
+    private final ClockDispatcher clockDispatcher = new ClockDispatcher(this::sendClockRpc);
+
     /** 数据变化通知（服务用它刷新通知栏，界面不需要订阅） */
     private volatile Runnable dataChangedListener;
 
@@ -102,6 +113,13 @@ public final class SyncPlayCore {
                         java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
                     StateRenderer.Sender s = sender;
                     if (s != null) s.sendSequential(msgs);
+                }
+
+                @Override
+                public void sendWithAck(com.smartdevicelink.proxy.RPCMessage msg, Runnable onDone) {
+                    StateRenderer.Sender s = sender;
+                    if (s != null) s.sendWithAck(msg, onDone);
+                    else onDone.run();
                 }
             });
 
@@ -183,15 +201,10 @@ public final class SyncPlayCore {
      * 所以流程改成：
      *   ① 先更新 {@link StateRenderer} 的本地计时状态（预览立刻正确）
      *   ② 再构造 RPC
-     *   ③ **有连接才发**；没连接就记一个待发标记，等连上后由
-     *      {@link #resendTimerIfPending()} 补发
+     *   ③ **有连接才发**；没连接就只留在本地状态里，等回到 FULL 时由
+     *      {@link #pushClockForce()} 按当前状态重投
      */
     public void doTimer(int h, int m, int s, String mode) {
-        lastTimerMode = mode;
-        lastTimerH = h;
-        lastTimerM = m;
-        lastTimerS = s;
-
         // ① 先冻结本地状态（PAUSE 要靠它记下 timerPausedAt）
         renderer.setTimerState(h, m, s, mode);
 
@@ -237,46 +250,27 @@ public final class SyncPlayCore {
         }
         if (list == null || list.isEmpty()) return;
 
-        StateRenderer.Sender sn = sender;
-        if (sn == null || !lifecycle.canSendRpc()) {
-            timerPendingSend = true;
+        if (sender == null || !lifecycle.canSendRpc()) {
             Log2.i(TAG, "计时器已更新本地状态（未连接，暂不发送）: " + mode);
             return;
         }
-        timerPendingSend = false;
-        for (SetMediaClockTimer t : list) t.setCorrelationID(nextCorr());
-        if (list.size() == 1) {
-            sn.send(list.get(0));
-        } else {
-            // 两步定格必须严格按序（COUNTUP 起表 → PAUSE 停住）
-            sn.sendSequential(list);
-        }
-        Log2.i(TAG, "计时器已发送: " + mode + "（" + list.size() + " 条）");
+        // 统一进时钟队列：和导航 ETA / 播放时间的两步法共享同一条串行线
+        clockDispatcher.submit(list, "计时器 " + mode);
     }
 
     /**
-     * 连上并进入 FULL 后调用：把"没发出去的计时器指令"补发一次。
+     * {@link ClockDispatcher} 的出口：把一条指令转给当前挂着的 {@link StateRenderer.Sender}。
      *
-     * 场景：用户没连车机时设了计时器（本地状态已生效），之后车机连上。
+     * <p>没连接时立刻回调 {@code onDone} —— 队列不能因为"发不出去"而卡住。</p>
      */
-    public void resendTimerIfPending() {
-        if (!timerPendingSend) return;
-        if (sender == null || !lifecycle.canSendRpc()) return;
-        Log2.i(TAG, "补发计时器指令: " + lastTimerMode);
-        timerPendingSend = false;
-        doTimer(lastTimerH, lastTimerM, lastTimerS, lastTimerMode);
+    private void sendClockRpc(com.smartdevicelink.proxy.RPCMessage msg, Runnable onDone) {
+        StateRenderer.Sender s = sender;
+        if (s == null) {
+            onDone.run();
+            return;
+        }
+        s.sendWithAck(msg, onDone);
     }
-
-    public boolean isTimerPendingSend() { return timerPendingSend; }
-
-    /** correlation ID 由本类统一分配（服务没起来时也要能用） */
-    private int corrId = 1000;
-
-    private int nextCorr() { return corrId++; }
-
-    private volatile boolean timerPendingSend = false;
-    private volatile int lastTimerH = 0, lastTimerM = 0, lastTimerS = 0;
-    private volatile String lastTimerMode = "COUNTUP";
 
     /** 「显示歌词」：重新走一遍加载（内存缓存命中会立刻回调，不联网） */
     public void reloadLyrics() {
@@ -339,9 +333,9 @@ public final class SyncPlayCore {
     }
 
     /**
-     * @param force true = 清掉节流缓存后重算重发。
+     * @param force true = 清掉指纹后重算重发。
      *              用于「回到 HMI_FULL / 重新连上」这种<b>车机那边的时钟格已经被清空</b>
-     *              的场景 —— 那时 ETA 没变、歌没换，普通节流会判定"不用发"，
+     *              的场景 —— 那时 ETA 没变、歌没换，指纹会判定"不用发"，
      *              结果车机上那一格永远空着。
      */
     private void pushClock(boolean force) {
@@ -350,30 +344,36 @@ public final class SyncPlayCore {
         java.util.List<com.smartdevicelink.proxy.rpc.SetMediaClockTimer> list =
                 renderer.songClockRpcList();
         if (list == null || list.isEmpty()) return;
-        StateRenderer.Sender s = sender;
-        if (s == null) return;
+        if (sender == null) return;
 
-        if (list.size() == 1) {
-            s.send(list.get(0));
-        } else {
-            // 多条必须严格按序（先 COUNTUP 起表、再 PAUSE 停住），否则会停错表
-            s.sendSequential(list);
-        }
+        // 统一进时钟队列（两步法必须严格按序，且不能被别的时钟指令插队）
+        clockDispatcher.submit(list, "时钟更新 " + list.size() + " 条");
     }
 
     /**
      * 回到 HMI_FULL / 重连后调用：按当前状态<b>强制</b>重推一次时钟。
      *
-     * <p>覆盖三种情况：</p>
+     * <p>覆盖这些情况：</p>
      * <ul>
      *   <li>计时器在跑 → 按本地记录的起始值重算读数，重投（车机那边已经丢了）</li>
      *   <li>计时器暂停 → 两步法重投定格读数（绝不能单条 PAUSE + startTime）</li>
-     *   <li>倒计时在失焦期间走完 → 自动清除，时钟格回落 ETA / 播放时间</li>
+     *   <li>倒计时已经走完 → 仍然显示 00:00（不自动清除，等用户手动清零）</li>
+     *   <li>没计时器 → 重投 ETA / 播放时间 / CLEAR</li>
      * </ul>
      */
     public void pushClockForce() {
         Log2.i(TAG, "强制重推时钟（回到 FULL / 重连）");
         pushClock(true);
+    }
+
+    /**
+     * 车机不接受 {@code endTime} 时由连接层调用：关掉「歌曲总时长」并重推一次。
+     *
+     * <p>不降级的话，那条带 endTime 的 COUNTUP 会被整条拒掉 —— 播放时间干脆不显示了。</p>
+     */
+    public void disableSongEndTime() {
+        renderer.setSongEndTimeEnabled(false);
+        pushClockForce();
     }
 
     // ---------------- 数据源回调 ----------------
