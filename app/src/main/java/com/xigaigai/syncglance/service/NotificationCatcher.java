@@ -162,7 +162,7 @@ public class NotificationCatcher extends NotificationListenerService {
     @Override
     public void onListenerConnected() {
         super.onListenerConnected();
-        Log2.i(TAG, "✓ 已连上通知服务（权限已授予）");
+        Log2.i(TAG, "已连通知服务");
         dumpActive("连接后已有通知");
     }
 
@@ -423,7 +423,7 @@ public class NotificationCatcher extends NotificationListenerService {
                     + "|" + (np.positionMs / 10_000);
             if (!sig.equals(lastSessionLog)) {
                 lastSessionLog = sig;
-                Log2.i(TAG, "媒体会话: " + np);
+                Log2.i(TAG, "媒体: " + np);
             }
 
             MusicListener l = musicListener;

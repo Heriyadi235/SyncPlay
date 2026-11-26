@@ -153,7 +153,7 @@ public class LyricManager {
         // ②.5 负缓存：最近查过且确实没有，短期内不再打网络
         File neg = new File(cacheDir, key + NEG_SUFFIX);
         if (neg.exists() && System.currentTimeMillis() - neg.lastModified() < NEG_TTL_MS) {
-            Log2.i(TAG, "负缓存命中，跳过网络查询: " + song.title);
+        Log2.i(TAG, "负缓存命中: " + song.title);
             current = null;
             currentKey = key;
             if (cb != null) cb.onLyrics(song, null);
@@ -228,7 +228,7 @@ public class LyricManager {
                 } else {
                     if (hadNetError) {
                         // 网络问题：不写负缓存，下次切回来还能重试
-                        Log2.i(TAG, "网络异常导致无歌词，不写负缓存: " + song.title);
+                        Log2.i(TAG, "网络异常无歌词，跳过负缓存: " + song.title);
                     } else {
                         Log2.i(TAG, "无歌词: " + song.title + " - " + song.artist);
                     }
@@ -252,7 +252,7 @@ public class LyricManager {
             List<Lrc.Line> lines = Lrc.parse(built);
             if (lines.isEmpty()) return;
             SyncLyric.write(syncFile, built);
-            Log2.i(TAG, "成品歌词就绪: " + song.title + " 共 " + lines.size() + " 屏");
+                Log2.i(TAG, "成品歌词 " + lines.size() + " 屏: " + song.title);
             main.post(() -> apply(song, key, lines, cb, "成品缓存", seq));
         } catch (Throwable t) {
             Log2.w(TAG, "生成成品歌词失败: " + t);
@@ -275,7 +275,7 @@ public class LyricManager {
         // 级别 1：原名
         String r = lrclibGet(title, art1, song.durationMs, netError);
         if (r != null) {
-            Log2.i(TAG, "lrclib 命中(原名): " + title);
+                Log2.i(TAG, "lrclib 原名: " + title);
             return r;
         }
 
@@ -283,7 +283,7 @@ public class LyricManager {
         if (!main.equalsIgnoreCase(title.trim())) {
             r = lrclibGet(main, art1, song.durationMs, netError);
             if (r != null) {
-                Log2.i(TAG, "lrclib 命中(剥括号): " + main);
+                Log2.i(TAG, "lrclib 剥括号: " + main);
                 return r;
             }
         }
@@ -291,7 +291,7 @@ public class LyricManager {
         // 级别 3：模糊搜索
         r = lrclibSearch(main.isEmpty() ? title : main, art1, song.durationMs, netError);
         if (r != null) {
-            Log2.i(TAG, "lrclib 命中(搜索): " + title);
+                Log2.i(TAG, "lrclib 搜索: " + title);
             return r;
         }
 
@@ -375,11 +375,26 @@ public class LyricManager {
         }
     }
 
+    /**
+     * 日志用 URL 精简：去掉协议和域名，只留「路径 + 查询参数」，过长截断。
+     *
+     * <p>2026-11-26：原来直接打完整 URL（每条约 280 字符，长途日志里占 15%）。
+     * 参数对排查歌词匹配有价值（track_name / artist_name / duration 都在查询串里），
+     * 所以保留参数、只砍掉 `https://lrclib.net/` 这种每次一样的部分。</p>
+     */
+    private static String logUrl(String url) {
+        if (url == null) return "";
+        int scheme = url.indexOf("//");
+        int slash = scheme >= 0 ? url.indexOf('/', scheme + 2) : -1;
+        String s = slash > 0 ? url.substring(slash + 1) : url;
+        return s.length() > 90 ? s.substring(0, 90) + "…" : s;
+    }
+
     /** 通用 JSON GET，404/429 都返回 null */
     private String httpGetJson(String url) {
         lastHttpWasNetworkError = false;
         try {
-            Log2.i(TAG, "查询 " + url);
+            Log2.i(TAG, "GET " + logUrl(url));
             HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
             c.setRequestMethod("GET");
             c.setRequestProperty("User-Agent", USER_AGENT);
@@ -434,7 +449,7 @@ public class LyricManager {
         }
         current = lines;
         currentKey = key;
-        Log2.i(TAG, "歌词就绪(" + src + "): " + song.title + " 共 " + lines.size() + " 句");
+        Log2.i(TAG, "歌词 " + lines.size() + " 句（" + src + "）: " + song.title);
         if (cb != null) cb.onLyrics(song, lines);
     }
 

@@ -78,9 +78,6 @@ public final class SyncPlayCore {
     /** 数据变化通知（服务用它刷新通知栏，界面不需要订阅） */
     private volatile Runnable dataChangedListener;
 
-    /** 上一次记进日志的导航摘要（降噪用） */
-    private String lastNavLog;
-
     private SyncPlayCore() { }
 
     // ---------------- 初始化 ----------------
@@ -141,7 +138,7 @@ public final class SyncPlayCore {
             AmapLinkClient.setNavListener(navListener);
             AmapLinkClient.get(app).start();
 
-            Log2.i(TAG, "SyncPlayCore 初始化完成（数据采集与连接层已解耦）");
+            Log2.i(TAG, "Core 初始化");
         }
     }
 
@@ -151,14 +148,14 @@ public final class SyncPlayCore {
     public void attachSender(StateRenderer.Sender s) {
         sender = s;
         renderer.onLifecycleChanged();
-        Log2.i(TAG, "发送通道已挂载（可以往车机发了）");
+        Log2.i(TAG, "发送通道挂载");
     }
 
     /** 连接结束时摘掉发送通道；渲染与数据采集不受影响 */
     public void detachSender() {
         sender = null;
         renderer.onDisconnected();
-        Log2.i(TAG, "发送通道已摘除（预览仍可工作）");
+        Log2.i(TAG, "发送通道摘除");
     }
 
     public boolean canSend() {
@@ -253,7 +250,7 @@ public final class SyncPlayCore {
         if (list == null || list.isEmpty()) return;
 
         if (sender == null || !lifecycle.canSendRpc()) {
-            Log2.i(TAG, "计时器已更新本地状态（未连接，暂不发送）: " + mode);
+            Log2.i(TAG, "计时器本地更新（未连接，暂不发）: " + mode);
             return;
         }
         // 统一进时钟队列：和导航 ETA / 播放时间的两步法共享同一条串行线
@@ -407,7 +404,7 @@ public final class SyncPlayCore {
 
         @Override
         public void onMusicGone() {
-            Log2.i(TAG, "音乐通知消失，清空歌曲状态并降级显示");
+            Log2.i(TAG, "音乐通知消失 → 清空歌曲");
             renderer.clearSong();
             notifyDataChanged();
         }
@@ -418,17 +415,14 @@ public final class SyncPlayCore {
         if (nav.hasData()) {
             setNavigation(nav);
 
-            // 日志降噪：高德每秒都推，只在关键字段变化时记一条
-            String summary = nav.instruction + "|" + nav.road + "|"
-                    + nav.remainDistance + "|" + nav.etaClockNow();
-            if (!summary.equals(lastNavLog)) {
-                lastNavLog = summary;
-                Log2.i(TAG, "导航数据: " + nav);
-            }
+            /*
+             * 2026-11-26：删掉了原来的 `导航数据: nav[...]` 日志 ——
+             * 它与 AmapLink 那条「导航 type4 左转 段316m 全程…」完全重复，
+             * 同一份数据每变化一次打两遍。导航侧要看字段变化看 AmapLink 那条即可。
+             */
         } else {
             // 空对象 = 导航结束/到达/高德退出，必须立刻降级
-            Log2.i(TAG, "导航已结束，立即降级显示");
-            lastNavLog = null;
+            Log2.i(TAG, "导航结束 → 降级");
             renderer.clearNavigation();
             renderer.markDirty("navEnd");
         }

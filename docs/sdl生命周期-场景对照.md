@@ -324,11 +324,11 @@ FULL + 数据变化 → flush() → Show(含 softButtons) → 车机画出来
 | 5 | 库 | 回调 `onSdlEnabled` | `[SdlReceiver] ★ onSdlEnabled` |
 | 6 | `SdlReceiver` | 单路启动服务（`startSelf` → `startForegroundService`） | `已直接启动 SdlService` |
 | 7 | `SdlService` | `onCreate` → 前台服务（`onStartCommand` 里 `startForeground` + 建通知） | `[SyncPlay] 服务创建` |
-| 8 | `SdlService` | `onStartCommand` → `startProxy()` | `启动时发现连接不可用…重建连接` |
-| 9 | `SdlService` | `SdlManager.build().start()` | `✓ SdlManager 已启动` |
+| 8 | `SdlService` | `onStartCommand` → `startProxy()` | `重建连接（SdlManager=…）` |
+| 9 | `SdlService` | `SdlManager.build().start()` | `SdlManager 启动` |
 | 10 | 车机 | `OnPermissionsChange` → `OnHMIStatus` NONE→BACKGROUND→LIMITED→FULL | `→ 已连接(FULL)` |
-| 11 | `SdlService` | 首次 FULL → `initializeForConnection()`：建菜单、订阅 13 键、补发计时器 | `★ 进入 FULL —— 开始初始化` |
-| 12 | `StateRenderer` | `flush()` → `Show`（3 个软键） | `[Render] Show[空闲] …` |
+| 11 | `SdlService` | 首次 FULL → `initializeForConnection()`：建菜单、订阅 13 键、补发计时器 | `进入 FULL` |
+| 12 | `StateRenderer` | `flush()` → `Show`（3 个软键） | `[SyncPlay] → Show #id`（内容看 raw JSON） |
 
 **软键**：FULL 后出现 `播放/暂停` | `-` | `计时` + 车机自带「更多」。
 

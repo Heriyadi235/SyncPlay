@@ -675,7 +675,7 @@ public class AmapLinkClient {
                 authReply.recycle();
             }
 
-            Log2.i(TAG, "授权返回: " + abbreviate(authJson, 500));
+            Log2.i(TAG, "授权 ← " + abbreviate(authJson, 120));
             Log2.raw("←auth", authJson);
 
             JSONObject authObj = null;
@@ -727,7 +727,7 @@ public class AmapLinkClient {
                             Parcel r = call(service, 2, p -> p.writeString(req.toString()));
                             String resp;
                             try { resp = r.readString(); } finally { r.recycle(); }
-                            Log2.i(TAG, "查询 cmd=" + cmd + " 返回: " + abbreviate(resp, 300));
+                            Log2.i(TAG, "cmd" + cmd + " ← " + abbreviate(resp, 120));
                             Log2.raw("←cmd" + cmd, resp);
                         } catch (Exception e) {
                             Log2.w(TAG, "查询 cmd=" + cmd + " 失败: " + e.getMessage());
@@ -780,14 +780,13 @@ public class AmapLinkClient {
         // ★ 注意这**不影响连接** —— 连接由 retry()/bind() 独立维持。
         if (!shouldDecode()) {
             if (shouldLogHeartbeat()) {
-                Log2.i(TAG, "收到回调 #" + callbackCount
-                        + "（小包 " + raw.length() + " 字符，没人看跳过解码）");
+                Log2.i(TAG, "回调 #" + callbackCount + " " + raw.length() + "B（无人看，跳过解码）");
             }
             return;
         }
 
         if (shouldLogHeartbeat()) {
-            Log2.i(TAG, "收到回调 #" + callbackCount + "（小包 " + raw.length() + " 字符）");
+            Log2.i(TAG, "回调 #" + callbackCount + " " + raw.length() + "B");
         }
 
         String plain = LinkEnvelope.decode(raw);
@@ -846,7 +845,7 @@ public class AmapLinkClient {
             int bizType = json.optInt("bizType", -1);
 
             if (bizType != 113) {
-                Log2.i(TAG, "解密后 bizType=" + bizType + " 内容: " + abbreviate(plain, 300));
+                Log2.i(TAG, "解密 bizType=" + bizType + " " + abbreviate(plain, 120));
                 Log2.raw("←plain", plain);
                 return;
             }
@@ -874,7 +873,7 @@ public class AmapLinkClient {
                 String prev = lastByType.get(type);
                 if (!summary.equals(prev)) {
                     lastByType.put(type, summary);
-                    Log2.i(TAG, "导航事件 type=" + type + "  " + summary);
+                    Log2.i(TAG, "导航 type" + type + " " + summary);
                 }
             }
 
@@ -1015,22 +1014,22 @@ public class AmapLinkClient {
         if (d == null) return null;
         switch (type) {
             case 4: {
-                // 行中导航信息
-                return "转向=" + maneuverName(d.optInt("curManeuverID", -1))
-                        + " 段剩余=" + d.opt("segmentRemainDist") + "m"
-                        + " 全程剩余=" + d.opt("routeRemainDist") + "m"
-                        + " 剩余时间=" + d.opt("routeRemainTime") + "s"
-                        + " 下一条路=" + d.optString("nextRouteName")
-                        + " 当前路=" + d.optString("curRouteName");
+                // 行中导航信息（参数全留，只压缩措辞）
+                return maneuverName(d.optInt("curManeuverID", -1))
+                        + " 段" + d.opt("segmentRemainDist") + "m"
+                        + " 全程" + d.opt("routeRemainDist") + "m"
+                        + " 剩" + d.opt("routeRemainTime") + "s"
+                        + " 下条=" + d.optString("nextRouteName")
+                        + " 当前=" + d.optString("curRouteName");
             }
             case 5: {
-                return "转向图标=" + maneuverName(d.optInt("maneuverID", -1));
+                return "图标=" + maneuverName(d.optInt("maneuverID", -1));
             }
-            case 7:  return "开始导航";
-            case 100: return "导航结束";
-            case 200: return "已到达";
+            case 7:  return "开始";
+            case 100: return "结束";
+            case 200: return "到达";
             case 14: {
-                return "车道数=" + d.opt("laneCount")
+                return "车道=" + d.opt("laneCount")
                         + " back=[" + d.opt("backLane") + "]"
                         + " front=[" + d.opt("frontLane") + "]";
             }

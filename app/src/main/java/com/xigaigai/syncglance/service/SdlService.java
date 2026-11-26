@@ -176,7 +176,7 @@ public class SdlService extends Service {
         createChannel();
         registerRouterWatcher();
 
-        Log2.i(TAG, "SyncPlay 服务创建（连接层）");
+        Log2.i(TAG, "服务创建");
     }
 
     // ---------------- RouterService 存活探测 ----------------
@@ -383,15 +383,14 @@ public class SdlService extends Service {
              *   所以只要 lifecycle 回到 DISCONNECTED，就要重新来一遍，
              *   否则会出现「蓝牙断开 → 用户手动开 App → 跳过重建 → 监听永远死着」。
              */
-            Log2.i(TAG, "启动时发现连接不可用（SdlManager=" + (sdlManager == null ? "null" : "已失效")
-                    + "），重建连接");
+            Log2.i(TAG, "重建连接（SdlManager=" + (sdlManager == null ? "null" : "失效") + "）");
             if (sdlManager == null) {
                 startProxy();          // 还没建过，直接建（不用走 reset 的销毁流程）
             } else {
                 resetProxy();
             }
         } else {
-            Log2.i(TAG, "启动时连接仍有效（" + lifecycle.describe() + "），复用");
+            Log2.i(TAG, "复用连接（" + lifecycle.describe() + "）");
         }
 
         return START_STICKY;
@@ -409,7 +408,7 @@ public class SdlService extends Service {
 
     @Override
     public void onDestroy() {
-        Log2.i(TAG, "服务销毁（连接层退出，数据采集与预览不受影响）");
+        Log2.i(TAG, "服务销毁");
         unregisterRouterWatcher();
         /*
          * ★ 这里绝对不能再 NotificationCatcher.setMusicListener(null)。
@@ -579,7 +578,7 @@ public class SdlService extends Service {
                     & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
             if (debuggable) {
                 DebugTool.enableDebugTool();
-                Log2.i(TAG, "SDL 内部日志已开启（logcat tag: SDL）");
+                Log2.i(TAG, "SDL 内部日志: on");
             }
 
             /*
@@ -647,7 +646,7 @@ public class SdlService extends Service {
             builder.setTransportType(new MultiplexTransportConfig(
                     getApplicationContext(), APP_ID,
                     MultiplexTransportConfig.FLAG_MULTI_SECURITY_OFF));
-            Log2.i(TAG, "传输配置：SECURITY_OFF + Multiplex（安全等级=0，跳过信任校验）");
+            Log2.i(TAG, "传输 Multiplex + SECURITY_OFF");
             builder.setShortAppName(SHORT_APP_NAME);
             builder.setAppTypes(appTypes);                       // → isMediaApplication = true
             builder.setLanguage(Language.ZH_CN);                  // 硬写中文
@@ -691,8 +690,7 @@ public class SdlService extends Service {
                         }
                     });
             sdlManager.start();
-            Log2.i(TAG, "✓ SdlManager 已启动，等待车机连上并完成注册"
-                    + "（appName=" + APP_NAME + ", appId=" + APP_ID + "）");
+            Log2.i(TAG, "SdlManager 启动（" + APP_NAME + " / " + APP_ID + "）");
         } catch (Exception e) {
             Log2.e(TAG, "创建 SdlManager 失败", e);
             sdlManager = null;
@@ -928,7 +926,6 @@ public class SdlService extends Service {
     public void buildMenus() {
         if (menusBuilt) return;
         menusBuilt = true;
-        Log2.i(TAG, "构建菜单");
 
         doAddSubMenu(CommandRouter.MENU_MUSIC, "音乐");
         doAddSubMenu(CommandRouter.MENU_NAV, "导航");
@@ -949,7 +946,7 @@ public class SdlService extends Service {
         doAddCommand(CommandRouter.CMD_TIMER_RESUME, "继续", "计时继续", CommandRouter.MENU_TIMER);
         doAddCommand(CommandRouter.CMD_TIMER_CLEAR, "清零", "计时清零", CommandRouter.MENU_TIMER);
 
-        Log2.i(TAG, "✓ 菜单已建：3 父 + 12 子");
+        Log2.i(TAG, "菜单 3 父 + 12 子");
     }
 
     /**
@@ -973,7 +970,7 @@ public class SdlService extends Service {
                 continue;
             }
             if (!supported.isEmpty() && !supported.contains(b)) {
-                Log2.i(TAG, "跳过不支持的按键 " + b);
+                Log2.i(TAG, "跳过 " + b + "（不支持）");
                 skipped++;
                 continue;
             }
@@ -981,8 +978,7 @@ public class SdlService extends Service {
             doSubscribe(b);
             ok++;
         }
-        Log2.i(TAG, "已发 " + ok + " 个 SubscribeButton"
-                + (skipped > 0 ? "（跳过 " + skipped + " 个不支持）" : ""));
+        Log2.i(TAG, "SubscribeButton " + ok + (skipped > 0 ? "（跳过 " + skipped + "）" : ""));
     }
 
     /** 车机声明支持的按键集合；读不到就返回空集（表示不做过滤） */
@@ -1092,11 +1088,11 @@ public class SdlService extends Service {
         renderer.onLifecycleChanged();
 
         if (lifecycle.justBecameFull(prev)) {
-            Log2.i(TAG, "★ 进入 FULL —— 开始初始化");
+            Log2.i(TAG, "进入 FULL");
             initializeForConnection();
         } else if (lifecycle.justLostFocus(prev)) {
             // 文档 3.4.4.4：FULL/LIMITED 期间发起的操作会被车机自动终止
-            Log2.w(TAG, "失去焦点（" + lifecycle.getState() + "），进行中的操作已被车机终止");
+            Log2.w(TAG, "失去焦点（" + lifecycle.getState() + "）");
             onLostFocus();
         }
     }
@@ -1122,91 +1118,79 @@ public class SdlService extends Service {
             }
             Log2.rawMsg("←RAI", rai);
 
-            StringBuilder sb = new StringBuilder("=== 车机能力清单 ===\n");
+            /*
+             * 2026-11-26：从 ~30 行压到 ~5 行。
+             *
+             * 原来把 16 个文本字段、13 个按键逐个列一遍，每次连接都刷一屏。
+             * 现在只留「能据此判断行为差异」的信息：
+             *   · 显示类型 / 时钟格式 / 字段数 + 非 40 宽度的例外
+             *   · 按键数量 + 名字（一行排开）
+             *   · 软键数 / 预设键区 / HMI 能力 / 诊断模式 / 语音与 VR
+             * 需要原文时上层还有 Log2.rawMsg("←RAI", rai)。
+             */
+            StringBuilder sb = new StringBuilder("=== RAI ===\n");
 
             try {
                 SdlMsgVersion v = rai.getSdlMsgVersion();
                 if (v != null) {
-                    sb.append("协议版本: ").append(v.getMajorVersion())
-                      .append('.').append(v.getMinorVersion()).append('\n');
+                    sb.append("协议 ").append(v.getMajorVersion())
+                      .append('.').append(v.getMinorVersion()).append(" / ");
                 }
             } catch (Exception ignored) { }
+            sb.append("SDL ").append(rai.getSdlVersion())
+              .append(" / 系统 ").append(rai.getSystemSoftwareVersion())
+              .append(" / ").append(rai.getLanguage()).append('\n');
 
-            sb.append("语言: ").append(rai.getLanguage())
-              .append("  HMI语言: ").append(rai.getHmiDisplayLanguage()).append('\n');
-
-            // 显示能力 —— 这是最关键的部分
             DisplayCapabilities dc = rai.getDisplayCapabilities();
             if (dc != null) {
-                sb.append("显示类型: ").append(dc.getDisplayType()).append('\n');
+                sb.append("显示 ").append(dc.getDisplayType());
+                java.util.List<MediaClockFormat> mcf = dc.getMediaClockFormats();
+                if (mcf != null) sb.append(" / 时钟 ").append(mcf);
                 java.util.List<TextField> fields = dc.getTextFields();
                 if (fields != null) {
-                    sb.append("文本字段: ").append(fields.size()).append(" 个\n");
+                    // 16 个字段全是 rows=1 / CID1SET / width=40，只有 scrollableMessageBody=200
+                    sb.append("\n文本 ").append(fields.size())
+                      .append(" 个（rows=1 CID1SET，width 40");
                     for (TextField tf : fields) {
-                        sb.append("   ").append(tf.getName())
-                          .append("  width=").append(tf.getWidth())
-                          .append("  rows=").append(tf.getRows())
-                          .append("  charset=").append(tf.getCharacterSet())
-                          .append('\n');
+                        if (tf.getWidth() != 40) {
+                            sb.append("；").append(tf.getName()).append('=').append(tf.getWidth());
+                        }
                     }
+                    sb.append("）");
                 }
-                java.util.List<MediaClockFormat> mcf = dc.getMediaClockFormats();
-                if (mcf != null) sb.append("媒体时钟格式: ").append(mcf).append('\n');
             }
 
             // 按键能力
             java.util.List<ButtonCapabilities> bc = rai.getButtonCapabilities();
             if (bc != null) {
-                sb.append("按键: ").append(bc.size()).append(" 个\n");
-                for (ButtonCapabilities b : bc) {
-                    sb.append("   ").append(b.getName())
-                      .append(" short=").append(b.getShortPressAvailable())
-                      .append(" long=").append(b.getLongPressAvailable())
-                      .append(" updown=").append(b.getUpDownAvailable())
-                      .append('\n');
+                sb.append("\n按键 ").append(bc.size()).append(": ");
+                for (int i = 0; i < bc.size(); i++) {
+                    if (i > 0) sb.append(' ');
+                    sb.append(bc.get(i).getName());
                 }
             }
 
-            // 语音能力
-            java.util.List<SpeechCapabilities> sc = rai.getSpeechCapabilities();
-            if (sc != null) sb.append("语音能力: ").append(sc).append('\n');
-            java.util.List<VrCapabilities> vc = rai.getVrCapabilities();
-            if (vc != null) sb.append("VR能力: ").append(vc).append('\n');
-
-            // 版本信息 —— 能确认固件代际
-            sb.append("SDL版本: ").append(rai.getSdlVersion()).append('\n');
-            sb.append("系统软件版本: ").append(rai.getSystemSoftwareVersion()).append('\n');
-
-            // 软键能力（预期为空，但值得确认）
             java.util.List<SoftButtonCapabilities> sbc = rai.getSoftButtonCapabilities();
-            sb.append("软键能力: ")
-              .append(sbc == null || sbc.isEmpty() ? "无（固件不支持）" : sbc.size() + " 个")
-              .append('\n');
-
-            // 预设键
+            sb.append("\n软键 ").append(sbc == null || sbc.isEmpty() ? "无" : sbc.size());
             try {
                 PresetBankCapabilities pbc = rai.getPresetBankCapabilities();
-                sb.append("预设键区: ")
-                  .append(pbc == null ? "无" : "有")
-                  .append('\n');
+                sb.append(" / 预设键区 ").append(pbc == null ? "无" : "有");
             } catch (Exception ignored) { }
-
-            // HMI 能力
             try {
                 HMICapabilities hc = rai.getHmiCapabilities();
                 if (hc != null) {
-                    sb.append("HMI能力: navi=").append(hc.isNavigationAvailable())
+                    sb.append(" / HMI navi=").append(hc.isNavigationAvailable())
                       .append(" phone=").append(hc.isPhoneCallAvailable())
-                      .append(" video=").append(hc.isVideoStreamingAvailable())
-                      .append('\n');
+                      .append(" video=").append(hc.isVideoStreamingAvailable());
                 }
             } catch (Exception ignored) { }
-
-            // 诊断模式支持
             java.util.List<Integer> diag = rai.getSupportedDiagModes();
-            sb.append("诊断模式: ")
-              .append(diag == null || diag.isEmpty() ? "无" : diag.toString())
-              .append('\n');
+            sb.append(" / 诊断 ").append(diag == null || diag.isEmpty() ? "无" : diag);
+
+            java.util.List<SpeechCapabilities> sc = rai.getSpeechCapabilities();
+            if (sc != null) sb.append("\n语音 ").append(sc);
+            java.util.List<VrCapabilities> vc = rai.getVrCapabilities();
+            if (vc != null) sb.append(" / VR ").append(vc);
 
             Log2.i(TAG, sb.toString());
         } catch (Exception e) {
@@ -1234,7 +1218,7 @@ public class SdlService extends Service {
              *   以前这里只是 markDirty("reFULL")，结果就是：
              *   导航中切走再切回来 → 到达时刻一直不显示（用户 2026-11-21 报告）。
              */
-            Log2.i(TAG, "本次连接已初始化过（回到 FULL），重推时钟");
+            Log2.i(TAG, "回到 FULL，重推时钟");
             renderer.markDirty("reFULL");
             com.xigaigai.syncglance.core.SyncPlayCore.get().pushClockForce();
             return;
@@ -1333,7 +1317,7 @@ public class SdlService extends Service {
             @Override
             public void onStart() {
                 if (gen != generation) return;
-                Log2.i(TAG, "✓ SdlManager onStart —— 已注册完成，等待车机下发 HMI 状态");
+                Log2.i(TAG, "RAI 成功，等 HMI");
                 managerStarted = true;
                 updateNotification();
                 /*
@@ -1430,9 +1414,9 @@ public class SdlService extends Service {
                 && !everGotHmiStatus
                 && fastFailRetryCount < FAST_FAIL_MAX_RETRY) {
             fastFailRetryCount++;
-            Log2.w(TAG, "秒失败（建连至今 " + sinceStart + "ms、零 HMI 报文、RouterAlive="
-                    + routerAlive + "），延迟 " + FAST_FAIL_RETRY_DELAY_MS
-                    + "ms 重试（第 " + fastFailRetryCount + "/" + FAST_FAIL_MAX_RETRY + " 次）");
+            Log2.w(TAG, "秒失败 " + sinceStart + "ms / HMI=0 / Router=" + routerAlive
+                    + " → " + FAST_FAIL_RETRY_DELAY_MS + "ms 后重试 "
+                    + fastFailRetryCount + "/" + FAST_FAIL_MAX_RETRY);
             // 收掉这次失败占的资源，但**不 stopSelf**
             sdlManager = null;
             lifecycle.onProxyClosed();
@@ -1445,9 +1429,8 @@ public class SdlService extends Service {
             return;
         }
 
-        Log2.i(TAG, "连接结束（原状态 " + lifecycle.getState() + "），按官方语义停掉 Service"
-                + " ［建连至今 " + sinceStart + "ms，RouterAlive=" + routerAlive
-                + "，代际=" + generation + "］");
+        Log2.i(TAG, "连接结束（" + lifecycle.getState() + "）" + sinceStart + "ms / Router="
+                + routerAlive + " / gen=" + generation);
         /*
          * 「连接关闭」只在**真的跟车机对上过话**之后才成立。
          *

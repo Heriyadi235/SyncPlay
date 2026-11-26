@@ -134,7 +134,7 @@ public class StateRenderer {
      */
     public void setSoftKeyCount(int n) {
         this.softKeyCount = Math.max(SOFT_KEY_DEFAULT, Math.min(SOFT_KEY_MAX, n));
-        Log2.i(TAG, "软键数量：" + softKeyCount);
+        Log2.i(TAG, "软键 " + softKeyCount);
         markDirty("softKeyCount");
     }
 
@@ -219,7 +219,7 @@ public class StateRenderer {
                 if (!warnedNotFull) {
                     warnedNotFull = true;
                     Log2.i(TAG, "暂不刷新（" +
-                            (lifecycle == null ? "未连接" : lifecycle.describe()) + "），等 HMI_FULL");
+                            (lifecycle == null ? "未连接" : lifecycle.describe()) + "）");
                 }
 
                 /*
@@ -684,9 +684,11 @@ public class StateRenderer {
             sender.send(s);
             lastPayload = payload;
             dirty = false;
-            Log2.i(TAG, "Show[" + frame.stateLabel + "] " + frame.f1 + " / " + frame.f2
-                    + " / " + frame.f3 + " / " + frame.f4
-                    + (frame.mediaTrack.isEmpty() ? "" : " / T=" + frame.mediaTrack));
+            /*
+             * 2026-11-26：删掉了原来的「Show[状态] f1 / f2 / f3 / f4 / T=…」——
+             * 每次 Show 打一行四段文本，与 `SdlService` 的 `→ Show #id` 重复，
+             * 且 raw 开着时完整包已经记了。真要看内容看 raw 即可。
+             */
         } catch (Exception e) {
             Log2.e(TAG, "Show 失败", e);
             dirty = true;
@@ -1210,9 +1212,9 @@ public class StateRenderer {
         if (plan.occupying() != lastTimerOccupying) {
             lastTimerOccupying = plan.occupying();
             if (lastTimerOccupying) {
-                Log2.i(TAG, "计时器接管时钟格");
+                Log2.i(TAG, "时钟: 计时器接管");
             } else {
-                Log2.i(TAG, "计时器已结束，时钟格交回 ETA / 播放时间");
+                Log2.i(TAG, "时钟: 交回 ETA/播放");
             }
         }
 

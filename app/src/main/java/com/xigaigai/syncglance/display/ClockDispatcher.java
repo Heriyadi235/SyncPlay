@@ -125,9 +125,9 @@ public final class ClockDispatcher {
         }
         inFlight = true;
         if (b.msgs.size() > 1) {
-            Log2.i(TAG, "开始发送时钟批次: " + b.reason + "（" + b.msgs.size() + " 条，严格按序）");
+            Log2.i(TAG, "时钟批次 " + b.msgs.size() + " 条（按序）: " + b.reason);
         } else {
-            Log2.i(TAG, "开始发送时钟批次: " + b.reason);
+            Log2.i(TAG, "时钟批次: " + b.reason);
         }
         sendOne(b, 0);
     }
