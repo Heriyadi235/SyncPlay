@@ -226,7 +226,7 @@ public class AmapLinkClient {
      * <ul>
      *   <li>收到高德的「导航中」通知（说明它活着并在工作）</li>
      *   <li>导航数据超过 8 秒没更新（{@code StateRenderer.staleWatchdog}）</li>
-     *   <li>用户点「刷新连接状态」/「重新连接」按钮</li>
+     *   <li>用户点「重新连接」按钮</li>
      * </ul>
      *
      * @param reconnectIfDead true = 发现已死就重置预算重绑；false = 只探测不动连接

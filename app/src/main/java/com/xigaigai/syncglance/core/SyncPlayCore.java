@@ -285,18 +285,6 @@ public final class SyncPlayCore {
         //   否则车机上那个到达时刻只会在换歌的瞬间刷新（历史 bug）。
         pushClock();
     }
-    public void setManualNavMode(boolean on) {
-        Navigation n = renderer.getNavigation();
-        if (n == null) n = new Navigation();
-        n.manualMode = on;
-        renderer.setNavigation(n);
-        Log2.i(TAG, "导航模式: " + (on ? "开" : "关"));
-    }
-
-    public boolean isManualNavMode() {
-        Navigation n = renderer.getNavigation();
-        return n != null && n.manualMode;
-    }
 
     /**
      * 清空歌词缓存并强制重新查一次当前这首歌。

@@ -24,9 +24,6 @@ public class Navigation {
     /** 最后更新时间 */
     public long lastUpdateMillis;
 
-    /** 手动开启的导航模式（通知解析成功时也会置 true） */
-    public boolean manualMode;
-
     /** 有可显示的内容 */
     public boolean hasData() {
         return notEmpty(instruction) || notEmpty(road) || notEmpty(remainDistance);
@@ -51,17 +48,19 @@ public class Navigation {
     /**
      * 数据是否还新鲜。
      *
-     * 高德正常每秒推送一次，超过 15 秒没更新说明：
+     * 高德正常每秒推送一次，超过 8 秒没更新说明：
      *   - 高德闪退了
      *   - 导航结束了但没发 type 100
      *   - 手机休眠了
      * 这时候必须当作"没有导航数据"，否则车机会一直卡在最后一条指令上误导司机。
      *
-     * 手动模式（用户点的）不受时效限制。
+     * <p>★ 这里以前还有一条 {@code if (manualMode && lastUpdateMillis == 0) return true;}
+     * ——那个 {@code manualMode}（老「导航模式」按钮）只在时间戳恰好为 0 时才起作用，
+     * 而真实数据流里 {@code onDecrypted} 每次都会写入时间戳，等于永远不生效，已删除。
+     * 现在的「导航优先」是纯显示层开关，在 {@code StateRenderer} 里，不参与新鲜度判断。</p>
      */
     public boolean isFresh() {
         if (!hasData()) return false;
-        if (manualMode && lastUpdateMillis == 0) return true;
         long age = System.currentTimeMillis() - lastUpdateMillis;
         return lastUpdateMillis > 0 && age >= 0 && age < STALE_MS;
     }

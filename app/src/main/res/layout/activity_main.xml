@@ -167,19 +167,19 @@
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btnSoftButton"
+                android:id="@+id/btnPermCheck"
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="软键测试：1 个"
+                android:text="权限检查"
                 android:textSize="13sp" />
 
             <Button
-                android:id="@+id/btnNavMode"
+                android:id="@+id/btnReset"
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="导航模式"
+                android:text="重置sync连接"
                 android:textSize="13sp" />
 
             <Button
@@ -197,54 +197,40 @@
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btnPermCheck"
+                android:id="@+id/btnNavMode"
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="权限检查"
+                android:text="导航模式"
                 android:textSize="13sp" />
 
             <Button
-                android:id="@+id/btnReset"
+                android:id="@+id/btnSoftButton"
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="重置连接"
+                android:text="软键测试：1 个"
                 android:textSize="13sp" />
 
-            <Button
-                android:id="@+id/btnOpenLog"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="通信日志"
-                android:textSize="13sp" />
-        </LinearLayout>
-
-        <!-- 高德连接的手动干预。两个按钮的区别：
-             刷新连接状态 = 只探活 + 更新显示，不动连接
-             重新连接     = 探活，死了就重置预算重绑 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btnProbeNav"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="刷新连接状态"
-                android:textSize="13sp" />
-
+            <!-- 高德连接的手动干预：探活，死了就重置预算重绑。
+                 连接状态本身已由上方状态栏的「导航：」一行实时显示（每 2 秒刷新，
+                 与预览页是否打开、车机是否连接都无关），所以不再单独留一个
+                 「刷新连接状态」按钮 —— 它比那行文字多不了任何信息。 -->
             <Button
                 android:id="@+id/btnReconnectNav"
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="重新连接"
+                android:text="重新连接Amap"
                 android:textSize="13sp" />
         </LinearLayout>
+
+        <Button
+            android:id="@+id/btnOpenLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="通信日志"
+            android:textSize="13sp" />
 
     </LinearLayout>
 </ScrollView>

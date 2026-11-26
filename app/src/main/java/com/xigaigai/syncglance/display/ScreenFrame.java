@@ -41,12 +41,16 @@ public final class ScreenFrame {
     public String[] softKeys = new String[0];
 
     /**
-     * 需要高亮的软键下标（-1 = 都不高亮）。
+     * 每个软键是否高亮（长度与 {@link #softKeys} 一致）。
      *
-     * 对应 SDL 的 {@code SoftButton.setIsHighlighted(true)} —— 车机会把那格画成选中态。
-     * 目前只用来标「计时」键：计时激活时高亮，清零后取消。
+     * <p>★ 为什么是数组：SDL 的 {@code isHighlighted} 是 {@code SoftButton} 结构体
+     * <b>内部</b>的布尔字段，每个按钮各有一个，规格里没有"只能亮一个"的约束。
+     * 本项目的用法是：格2「导航优先开启」（仅混合模式）、格3「计时器占用时钟格」
+     * 两格<b>可以同时</b>高亮。</p>
+     *
+     * <p>⚠️ 本车机能否同时渲染两个高亮，需要实车确认（规格允许，渲染是实现侧的事）。</p>
      */
-    public int highlightIndex = -1;
+    public boolean[] softKeyHighlighted = new boolean[0];
 
     /** HMI 是否 FULL（决定标题栏是否标注「未连接」） */
     public boolean connected;
@@ -55,6 +59,6 @@ public final class ScreenFrame {
     public String stamp() {
         return stateLabel + "|" + f1 + "|" + f2 + "|" + f3 + "|" + f4 + "|" + mediaTrack
                 + "|sk=" + java.util.Arrays.toString(softKeys)
-                + "|hl=" + highlightIndex;
+                + "|hl=" + java.util.Arrays.toString(softKeyHighlighted);
     }
 }

@@ -34,15 +34,15 @@ import com.smartdevicelink.proxy.rpc.enums.ButtonName;
 /**
  * SyncPlay 主界面。
  *
- * 布局（两列）：
- *   状态
- *   车机     [权限检查] [重置连接]
+ * 布局（按分组，按钮均在各自分组内等宽）：
+ *   状态     连接 / 媒体 / 导航 三行实时文字（每 2 秒刷新）
  *   音乐     [播放网易云] [暂停/继续]
- *   导航     [高德地图] [回家]
- *            [去公司]   [软键开关]
- *   计时器   [正计时]   [倒计时]
+ *   导航     [高德地图] [回家] [去公司]
+ *   计时器   [正计时] [倒计时]
  *            [暂停计时] [清零]
- *   其他     [导航模式] [键位设置]
+ *   其他     [权限检查] [重置sync连接] [键位设置]
+ *            [导航模式] [软键测试] [重新连接Amap]
+ *            [通信日志]（整行）
  *
  * 日志和车机预览在 LogActivity 里，从左边缘右滑进入。
  */
@@ -119,29 +119,16 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnNavMode).setOnClickListener(v -> toggleNavMode());
 
         /*
-         * 「刷新连接状态」：只探活 + 更新显示，不动连接。
-         *
-         * 用 binder 主动探测（isBinderAlive + pingBinder），不是等回调 ——
-         * 高德被 force-stop 时系统不一定回调，registered 会是假的 true。
-         */
-        findViewById(R.id.btnProbeNav).setOnClickListener(v -> {
-            AmapLinkClient amap = AmapLinkClient.get(this);
-            if (!amap.isRegistered()) {
-                toast("高德未连接：" + amap.displayStatus());
-                refreshState();
-                return;
-            }
-            boolean alive = amap.isLinkAlive();
-            toast(alive ? "连接有效（binder 正常）" : "⚠ 连接已失效（高德可能被关闭）");
-            Log2.i("UI", "手动刷新连接状态 → " + (alive ? "有效" : "失效"));
-            refreshState();
-        });
-
-        /*
          * 「重新连接」：探活，死了就重置预算重绑。
          *
-         * 与「刷新连接状态」的区别：这个会**真的动手**。用于高德被关掉、
-         * 自动重试预算又已经耗尽的场景 —— 手动满血复活。
+         * ★ 这是**唯一**能让重试预算立刻满血复活的入口。自动重试链试满
+         *   8 次就停了（见 AmapLinkClient.MAX_ATTEMPTS），之后想再连上只能靠
+         *   事件唤醒。用于高德被关掉、预算又已经耗尽的场景。
+         *
+         * ★ 以前还有一个「刷新连接状态」按钮（只探活 + 更新显示，不动连接），
+         *   已删除：上方状态栏的「导航：」一行本来就每 2 秒刷新，
+         *   且 displayStatus() 全程不看 shouldDecode()，与「预览页开没开、
+         *   车机连没连」都无关 —— 那个按钮比这行文字多不了任何信息。
          */
         findViewById(R.id.btnReconnectNav).setOnClickListener(v -> {
             AmapLinkClient amap = AmapLinkClient.get(this);
@@ -345,11 +332,22 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 「导航模式」按钮 —— 切换「导航优先」，与车机底栏第 2 格（软键 9002）是同一个开关。
+     *
+     * <p>只在混合模式（导航 + 歌曲同时有）下看得出效果：
+     * 开 → 第 1 屏导航、第 2 屏歌曲；关 → 第 1 屏歌曲、第 2 屏导航。</p>
+     *
+     * <p>★ 以前这里切的是 {@code Navigation.manualMode}，那个标志只在
+     * {@code isFresh()} 里对 {@code lastUpdateMillis == 0} 生效 ——
+     * 而真实数据流里时间戳永远有值，等于点了没反应，已删除。</p>
+     */
     private void toggleNavMode() {
-        // 导航模式是本地开关（SyncPlayCore 里本来就有），不必依赖 SdlService 实例
-        boolean on = !SyncPlayCore.get().isManualNavMode();
-        SyncPlayCore.get().setManualNavMode(on);
-        toast("导航模式：" + (on ? "开" : "关"));
+        // 走 StateRenderer：这是显示层状态，不依赖 SdlService 实例（断开就 stopSelf）
+        com.xigaigai.syncglance.display.StateRenderer r = SyncPlayCore.get().renderer();
+        boolean on = !r.isNavPriority();
+        r.setNavPriority(on);
+        toast("导航优先：" + (on ? "开" : "关") + (r.isMixedState() ? "" : "（当前非混合模式，切换后暂无变化）"));
     }
 
     // ---------------- 计时器 ----------------

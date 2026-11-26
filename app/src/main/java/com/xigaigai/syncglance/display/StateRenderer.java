@@ -123,7 +123,47 @@ public class StateRenderer {
     /** 第 3 格固定是「计时」键（下标 2） */
     public static final int TIMER_KEY_INDEX = 2;
 
+    /** 第 2 格是「导航」优先开关（下标 1）。仅在混合模式下才显示为「导航」 */
+    public static final int NAV_KEY_INDEX = 1;
+
     private volatile int softKeyCount = SOFT_KEY_DEFAULT;
+
+    /**
+     * 导航优先开关（只在混合模式 {@link State#D_BOTH} 下有意义）。
+     *
+     * <pre>
+     *   开（默认） f1/f2 = 导航（指令 / 路名）   f3/f4 = 歌词（无歌词时歌名 / 歌手）
+     *   关         f1/f2 = 歌词（无歌词时歌名 / 歌手） f3/f4 = 导航（指令 / 路名）
+     * </pre>
+     *
+     * ★ 默认 <b>true</b>：等于改动之前混合模式的排法，
+     *   升级后不会突然把导航挤到第 2 屏。
+     *
+     * <p>⚠️ 关闭时导航退到第 2 屏，而车机在第 2 屏停留一会儿后会自己跳回第 1 屏
+     * （实车行为，见 AGENTS.md 6.7）—— 也就是说关闭态的转向提示会被车机跳走。
+     * 这是用户明确接受的行为，不是 bug。</p>
+     */
+    private volatile boolean navPriority = true;
+
+    public boolean isNavPriority() { return navPriority; }
+
+    /** 设置导航优先；变化时重画（软键文案与两屏内容都可能变） */
+    public void setNavPriority(boolean on) {
+        if (this.navPriority == on) return;
+        this.navPriority = on;
+        Log2.i(TAG, "导航优先: " + (on ? "开" : "关"));
+        markDirty("navPriority");
+    }
+
+    /**
+     * 当前是否处于混合模式（导航 + 歌曲同时有）。
+     *
+     * <p>「导航」软键只在这时候出现；其他状态下第 2 格退回占位 {@code -}，
+     * 因为那会儿没有"谁优先"的问题，摆一个点了没反应的键只会让人困惑。</p>
+     */
+    public boolean isMixedState() {
+        return currentState() == State.D_BOTH;
+    }
 
     /**
      * 设置软键数量。
@@ -157,20 +197,27 @@ public class StateRenderer {
      *
      * 固定布局（共 4 格，第 4 格「更多…」由车机自带）：
      * <pre>
-     *   格1 播放/暂停   格2 测试键   格3 计时
-     *   9001           9002        9003
+     *   格1 播放/暂停   格2 导航/占位   格3 计时
+     *   9001           9002            9003
      * </pre>
+     * 格 2 的文案随状态变：
+     * <ul>
+     *   <li>混合模式（{@link State#D_BOTH}）→ 「导航」，按压切换导航优先</li>
+     *   <li>其他状态 → 「-」纯占位（那会儿没有谁优先的问题）</li>
+     * </ul>
      * 「软键测试」把数量调到 >3 时，第 4 格起追加「键4」「键5」…；
      * 调到 <3 时计时键会跟着消失（那是测试模式，属预期）。
      */
     public java.util.List<String> getSoftKeyTexts() {
         java.util.List<String> out = new java.util.ArrayList<>();
         out.add(getSoftKey1());
+        // 混合模式才显示「导航」，否则第 2 格是纯占位
+        final boolean showNavKey = isMixedState();
         for (int i = 2; i <= softKeyCount; i++) {
             if (i - 1 == TIMER_KEY_INDEX) {
                 out.add("\u8ba1\u65f6");                     // 格3「计时」：始终显示这几个字
-            } else if (i == 2) {
-                out.add("-");                                // 格2 留空占位（ASCII 连字符，有字形）
+            } else if (i - 1 == NAV_KEY_INDEX) {
+                out.add(showNavKey ? "导航" : "-");          // 格2：混合模式显示「导航」
             } else {
                 out.add("\u952e" + i);                       // 「键4」「键5」…
             }
@@ -178,20 +225,39 @@ public class StateRenderer {
         return out;
     }
 
-    /** 软键 ID：第 1 格固定 9001，依次 +1（计时键 = 9003） */
+    /** 软键 ID：第 1 格固定 9001，依次 +1（计时键 = 9003，导航键 = 9002） */
     public static final int SOFT_BUTTON_ID = 9001;
 
     /**
-     * 需要高亮的软键下标。
+     * 每个软键是否高亮（长度 = 实际软键个数）。
      *
-     * ★ 判据：**时钟格此刻显示的是不是计时器时间**（用户 2026-11-21 明确要求）。
-     *   不再单独看 {@code timerActive} —— 那个标记只能说明"用户设过计时器"，
-     *   但真正该高亮的语义是"你在那一格看到的是计时器"。
-     *   两者现在由同一个入口 {@link #isTimerOccupyingClock()} 表达，避免将来再次分叉。
+     * <h3>为什么是数组而不是单个下标</h3>
+     * SDL 的 {@code isHighlighted} 是 {@code SoftButton} 结构体<b>内部</b>的布尔字段
+     * （见 rpc_spec 的 MOBILE_API.xml：{@code <param name="isHighlighted" type="Boolean">}），
+     * 8 个按钮就是 8 个独立开关，规格里<b>没有</b>"全局只能亮一个"或互斥的约束。
+     * 所以两个键同时高亮是允许的 —— 本车机是否这样渲染，需要实车确认。
+     *
+     * <h3>谁该亮</h3>
+     * <ul>
+     *   <li>格 3「计时」：时钟格此刻显示的就是计时器时间（见 {@link #isTimerOccupyingClock()}）</li>
+     *   <li>格 2「导航」：<b>混合模式 + 导航优先开</b> 时才亮。
+     *       非混合模式下该格是占位 {@code -}，不亮。</li>
+     * </ul>
      */
-    private int highlightIndex() {
-        if (!isTimerOccupyingClock()) return -1;
-        return softKeyCount > TIMER_KEY_INDEX ? TIMER_KEY_INDEX : -1;
+    public boolean[] softKeyHighlights() {
+        int n = Math.max(0, softKeyCount);
+        boolean[] out = new boolean[n];
+
+        // 格 2「导航」：只有混合模式且导航优先开着才高亮
+        if (NAV_KEY_INDEX < n) {
+            out[NAV_KEY_INDEX] = isMixedState() && navPriority;
+        }
+
+        // 格 3「计时」：时钟格被计时器占用时高亮
+        if (TIMER_KEY_INDEX < n && isTimerOccupyingClock()) {
+            out[TIMER_KEY_INDEX] = true;
+        }
+        return out;
     }
 
     // ---- 节流 ----
@@ -380,13 +446,6 @@ public class StateRenderer {
 
     public void setAmapProbeListener(Runnable r) {
         this.amapProbe = r;
-    }
-
-    /** 同样的探活，但由用户手动触发（「刷新连接状态」按钮） */
-    public void probeAmapNow() {
-        if (amapProbe != null) {
-            try { amapProbe.run(); } catch (Exception ignored) { }
-        }
     }
 
     public void setNavigation(Navigation n) {
@@ -671,8 +730,9 @@ public class StateRenderer {
                 b.setText(frame.softKeys[i]);
                 b.setSoftButtonID(SOFT_BUTTON_ID + i);
                 b.setSystemAction(SystemAction.DEFAULT_ACTION);
-                // 计时激活时把「计时」格高亮（车机画成选中态）
-                b.setIsHighlighted(i == frame.highlightIndex);
+                // ★ 高亮是「每格一个布尔」：格2 导航优先、格3 计时可以同时亮
+                b.setIsHighlighted(i < frame.softKeyHighlighted.length
+                        && frame.softKeyHighlighted[i]);
                 keys.add(b);
             }
             s.setSoftButtons(keys);
@@ -762,20 +822,44 @@ public class StateRenderer {
 
             case D_BOTH:
             default: {
-                // 第 1 屏：导航指令 / 路名
-                f.f1 = nz(nav.instruction);
-                f.f2 = nz(nav.road);
-
-                // 第 2 屏：两行全给歌词；没歌词时第一行提示
-                if (lyrics != null && !lyrics.isEmpty()) {
-                    String[] fl = lyricLines(song.positionMs);
-                    f.f3 = fl[0];
-                    f.f4 = fl[1];
+                /*
+                 * ★ 混合模式：导航与歌曲争第 1 屏，由「导航优先」开关决定（车机软键 2 /
+                 *   手机「导航模式」按钮，两处同一个开关）。
+                 *
+                 *   开（默认）  f1/f2 = 导航（指令 / 路名）     f3/f4 = 歌曲
+                 *   关          f1/f2 = 歌曲                     f3/f4 = 导航（指令 / 路名）
+                 *
+                 *   ⚠️ 关闭态下导航退到第 2 屏，而车机在第 2 屏停留一会儿后会自己
+                 *   跳回第 1 屏（AGENTS.md 6.7）—— 转向提示会被跳走。这是用户明确
+                 *   接受的行为，不是 bug，不要"修"。
+                 *
+                 *   歌曲那两行：有歌词给歌词（跟随时间轴），没歌词退化成歌名 / 歌手。
+                 *   以前没歌词时第 2 屏只有一句「无歌词信息」+ 空行，白占一格。
+                 */
+                boolean hasLyric = lyrics != null && !lyrics.isEmpty();
+                String[] songTwo;
+                if (hasLyric) {
+                    songTwo = lyricLines(song.positionMs);
                 } else {
-                    f.f3 = "无歌词信息";
-                    f.f4 = "";
+                    songTwo = new String[]{nz(song.title), nz(song.artist)};
                 }
-                // mediaTrack：始终显示导航剩余距离（导航优先）
+
+                if (navPriority) {
+                    // 第 1 屏：导航指令 / 路名
+                    f.f1 = nz(nav.instruction);
+                    f.f2 = nz(nav.road);
+                    // 第 2 屏：歌词 / 歌名+歌手
+                    f.f3 = songTwo[0];
+                    f.f4 = songTwo[1];
+                } else {
+                    // 第 1 屏：歌词 / 歌名+歌手
+                    f.f1 = songTwo[0];
+                    f.f2 = songTwo[1];
+                    // 第 2 屏：导航指令 / 路名
+                    f.f3 = nz(nav.instruction);
+                    f.f4 = nz(nav.road);
+                }
+                // mediaTrack：两种模式下都保持导航剩余距离（ETA 走时钟格，不占主文本）
                 f.mediaTrack = nz(nav.remainDistance);
                 break;
             }
@@ -817,8 +901,8 @@ public class StateRenderer {
         // ★ 底栏软键（第 1 格播放/暂停，第 3 格计时，其余是测试键）
         java.util.List<String> keys = getSoftKeyTexts();
         f.softKeys = keys.toArray(new String[0]);
-        // ★ 计时激活时高亮「计时」格（车机画成选中态）
-        f.highlightIndex = highlightIndex();
+        // ★ 每格一个布尔：格2 导航优先（仅混合模式）、格3 计时，可同时高亮
+        f.softKeyHighlighted = softKeyHighlights();
 
         return f;
     }

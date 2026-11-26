@@ -37,6 +37,13 @@ public final class CommandRouter {
     public static final int CMD_SOFT_PLAY_PAUSE = 9001;
     /** 软键 ID，必须和 Show.softButtons 里设的一致 */
     public static final int SOFT_BTN_PLAY_PAUSE = 9001;
+    /**
+     * 第 2 格「导航」键（{@code StateRenderer.SOFT_BUTTON_ID + 1}）。
+     *
+     * <p>只在混合模式（导航 + 歌曲同时有）下才显示为「导航」，
+     * 其余状态下那格是占位 {@code -}，按压不响应。</p>
+     */
+    public static final int SOFT_BTN_NAV = 9002;
     /** 第 3 格「计时」键（StateRenderer.SOFT_BUTTON_ID + 2） */
     public static final int SOFT_BTN_TIMER = 9003;
 
@@ -76,10 +83,12 @@ public final class CommandRouter {
                 break;
 
             case CMD_NAV_ON:
-                svc.setManualNavMode(true);
+                // 导航优先：开（混合模式下导航占第 1 屏）
+                svc.getRenderer().setNavPriority(true);
                 break;
             case CMD_NAV_OFF:
-                svc.setManualNavMode(false);
+                // 导航优先：关（歌曲占第 1 屏，导航退到第 2 屏）
+                svc.getRenderer().setNavPriority(false);
                 break;
 
             case CMD_TIMER_UP:
@@ -126,6 +135,22 @@ public final class CommandRouter {
         switch (id) {
             case SOFT_BTN_PLAY_PAUSE:
                 handle(svc, CMD_SOFT_PLAY_PAUSE);
+                break;
+            case SOFT_BTN_NAV:
+                /*
+                 * 第 2 格「导航优先」开关。
+                 *
+                 * ★ 非混合模式下这格是占位 `-`（getSoftKeyTexts 里按状态切换），
+                 *   点了应该没反应 —— 那会儿没有"谁优先"的问题，
+                 *   悄悄改一个看不见的开关只会让人下次莫名其妙。
+                 */
+                com.xigaigai.syncglance.display.StateRenderer r = svc.getRenderer();
+                if (r == null) return;
+                if (!r.isMixedState()) {
+                    Log2.i(TAG, "软键 导航：当前非混合模式，忽略");
+                    return;
+                }
+                r.setNavPriority(!r.isNavPriority());
                 break;
             case SOFT_BTN_TIMER:
                 handleTimerKey(svc);

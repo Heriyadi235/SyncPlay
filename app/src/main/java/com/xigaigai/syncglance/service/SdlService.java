@@ -1037,19 +1037,10 @@ public class SdlService extends Service {
         com.xigaigai.syncglance.core.SyncPlayCore.get().setNavigation(nav);
     }
 
-    /** 手动切换导航模式 */
-    public void setManualNavMode(boolean on) {
-        Navigation n = renderer.getNavigation();
-        if (n == null) { n = new Navigation(); }
-        n.manualMode = on;
-        renderer.setNavigation(n);
-        Log2.i(TAG, "导航模式: " + (on ? "开" : "关"));
-    }
-
-    public boolean isManualNavMode() {
-        Navigation n = renderer.getNavigation();
-        return n != null && n.manualMode;
-    }
+    // 「导航优先」开关不在这里：它是显示层状态，走
+    // renderer.setNavPriority() / isNavPriority()，见 StateRenderer。
+    // （旧的两个 setManualNavMode/isManualNavMode 改的是 Navigation.manualMode，
+    //   那个标志对显示无实际影响，已删除。）
 
     // ---------------- 生命周期回调（核心）----------------
 
