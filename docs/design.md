@@ -233,22 +233,71 @@
 **设计原则**：判定依据是「这一行当前装的是什么」，而不是「现在是 ABCD 哪个状态」。
 以后加新布局，只要在填 track 时标明内容类型，指示符自动就对。
 
-### 2.8 计时器显示
+### 2.8 时钟格：显示什么（优先级矩阵）
 
-- 位置：第 3 行右侧，由 `SetMediaClockTimer` 渲染
-- **暂停时仍占屏**：用「两步法」把读数定格 —— 见下
-- 计时器存在（走秒或暂停）时，ETA 和播放进度都让位
-- **倒计时上限 59:59**：车机那一格只有 `mm:ss`，分钟滚轮给到 59 为止
-  （车机时钟格只有 `mm:ss`，没有小时位）
+位置：第 3 行右侧，由 `SetMediaClockTimer` 渲染。
 
-#### 2.8.1 「定格一个读数」必须两步（实车语义）
+**优先级（唯一口径）**：
 
-2026-11-21 用 RPC Builder 在车上验证出来（详见 `AGENTS.md` §6.6.1）：
+| 顺序 | 显示内容 | 判据 | 指令 |
+|---|---|---|---|
+| 1 | 用户计时器 · 走表 | `timerActive && timerRunning` | `COUNTUP` / `COUNTDOWN`（起始 = **当前读数**） |
+| 2 | 用户计时器 · 暂停定格 | `timerActive && !timerRunning` | 两步法定格 |
+| 3 | 导航 ETA | 有导航数据 | 两步法借 `mm:ss` 位定格 |
+| 4 | 歌曲播放时间 | 有歌且在播 | `COUNTUP(startTime=播放位置, endTime=歌曲总长)` |
+| 5 | 歌曲暂停定格 | 有歌且暂停 | 两步法定格 |
+| 6 | 清空 | 都没有 | `CLEAR` |
 
-| 指令 | `startTime` 是否生效 |
+三条容易搞错的地方：
+
+- **「计时器在运行」= 用户没有清零**，暂停中同样占屏。否则导航一开始，暂停的读数
+  就被 ETA 抢走（2026-11-22 实车 bug：「导航覆盖计时器 + 再点消失」）。
+- **跨失焦重投用「当前读数」而不是「起始值」**：车机那边的表已经丢了，
+  用读数重投才能接上；用起始值会让读数慢一截。
+- **重投倒计时必须发 `COUNTDOWN`**：以前一律发 `COUNTUP`，重投后倒计时会变成正计时。
+
+**车机能力边界**：车机只在本 App 处于 `HMI_FULL` 时认这块表，一掉出 FULL 就会丢弃。
+所以上面这张表只在「**本 App 激活期间**」成立 —— 不存在「切到收音机页面还显示计时器」
+这种事（SYNC 1.1 做不到）。
+
+### 2.8.1 小时位：格式与上限（2026-11-27 实测修正）
+
+**时钟格有小时位**：`startTime.hours` 生效，`1:23:45` 能正常渲染。因此：
+
+- 计时器不再受 `59:59` 限制，正计时超过 1 小时显示 `1:00:00`
+- 倒计时 UI 给「时 / 分 / 秒」三个滚轮，小时 0~59（先按 SDL `StartTime.hours` 的协议范围，
+  车机真实上限待实测），总时长可到 `59:59:59`
+- **ETA 保持不变**：仍然借 `mm:ss` 位显示到达时刻（`StartTime(0, hh, mm)` → `16:21`）
+
+两种语义共用同一格，靠**有没有小时段**区分，预览器也照这个规则画：
+
+| 内容 | 显示 |
+|---|---|
+| 计时器 / 播放时间（< 1 小时） | `mm:ss` |
+| 计时器 / 播放时间（≥ 1 小时） | `h:mm:ss` |
+| 导航 ETA | `hh:mm`（h=0，天然落在 `mm:ss` 那一支） |
+
+### 2.8.2 倒计时到期不自动清除（2026-11-27 决定）
+
+倒计时走到 `00:00` 之后：
+
+- 时钟格**保留 `00:00`**，不清屏、不回落 ETA / 播放时间
+- 底栏「计时」键**保持高亮**
+- 只有用户手动点该键（或车机菜单「计时 → 清零」）才发 `CLEAR`
+
+实现上 `ClockPlanner` 不做到期清理，只由 `StateRenderer.isTimerExpired()` 给判据；
+`CommandRouter.handleTimerKey` **先判到期、再判「在跑」** —— 顺序反了会误发 `PAUSE`，
+用户点「清零」结果什么都没发生。
+
+### 2.8.3 「定格一个读数」必须两步（实车语义）
+
+2026-11-21 用 RPC Builder 在车上验证，2026-11-27 补测（详见 `AGENTS.md` §6.6.1）：
+
+| 指令 | `startTime` / `endTime` 是否生效 |
 |---|---|
 | `COUNTUP` / `COUNTDOWN` | ✅ 生效，从给定时间起表 |
-| `PAUSE` / `RESUME` | ❌ **被忽略**，只暂停/继续当前那块表 |
+| `PAUSE` / `RESUME` | ❌ **被忽略**；**带了参数会被拒** |
+| `CLEAR` | ❌ 不接受时间参数 |
 | `PAUSE`，当前无 timer | ❌ 返回 `REJECTED` |
 | `PAUSE`，当前已是暂停态 | ❌ 返回 `IGNORE` |
 
@@ -256,15 +305,31 @@
 
 ```
 ① COUNTUP(startTime=目标值)     起一块表
-② PAUSE                         停住它（不带 startTime，带了也白搭）
+② PAUSE                         停住它（不带任何时间参数）
 ```
 
-两条**必须按顺序发**（`sendSequentialRPCs`）。并发发出去的话 PAUSE 可能先到，
-就会被拒或者停错表。
+两条**必须严格按序**，且不能被别的时钟指令插队 —— 所以所有时钟指令都走
+`display/ClockDispatcher`（单 in-flight 队列）。并发发出去的话 `PAUSE` 可能先到，
+就会停错表或者被拒。
 
 > 历史教训：以前用的是 `updatePauseWithNewStartTime(定格读数)` 单条 PAUSE，
 > 车机压根不看那个时间参数 —— 所以"暂停定格"其实一直是坏的，
 > 表现就是那一格空着或者保持旧值。
+
+### 2.8.4 实现结构（代码在哪）
+
+| 文件 | 职责 |
+|---|---|
+| `display/ClockRpc` | `SetMediaClockTimer` 的**唯一**构造入口；守着「PAUSE/RESUME/CLEAR 不带时间」和「定格必须两步法」 |
+| `display/ClockPlanner` | 纯逻辑决策：状态快照 → 指令序列 + 预览指令 + 指纹；优先级只在这里判 |
+| `display/ClockDispatcher` | 所有时钟指令的**唯一**发送队列：单 in-flight、严格按序、新批次覆盖排队中的旧批次、1.5s 超时兜底 |
+| `display/ClockInstruction` | 预览用的「指令」，预览器拿它自己走表（与 App 刷新频率解耦） |
+| `display/StateRenderer` | 持有状态与指纹，`songClockRpcList()` 去重后交给 Dispatcher |
+| `core/SyncPlayCore` | `doTimer()` 更新本地状态 → 显式指令 → `pushClock()` 回落；回到 FULL 时 `pushClockForce()` 重投 |
+
+**指纹**：一个字符串代表「这一格现在应该显示什么」。相同 = 车机那边已经对了、不重发。
+它替代了以前 5 个互相打架的标记（`timerClockKey` / `songClockStarted` / `lastSongKey` /
+`lastClockTextSent` / `lastEtaSent`）。跨失焦 / 重连时清空指纹强制重投。
 
 ### 2.9 导航 ETA 显示
 
@@ -272,26 +337,38 @@
 
 高德数据包里本来就带 ETA 时刻，没必要换算成「还剩多少」再倒计时。
 
-**借 mm:ss 位显示到达时刻**：车机那一格是 `mm:ss`，把 `hh:mm` 拆成
-`minutes=hh, seconds=mm`，车机会原样渲染成 `16:21`：
+**借 mm:ss 位显示到达时刻**：把 `hh:mm` 拆成 `minutes=hh, seconds=mm`，
+车机渲染成 `16:21`：
 
 ```java
-// 两步法（见 §2.8.1）：
+// 两步法（见 §2.8.3）：
 //   ① COUNTUP(StartTime(0, hh, mm))  → 车机起表
 //   ② PAUSE                          → 停住
 // ⚠ 单步 PAUSE + startTime 无效，车机会 REJECTED
-SetMediaClockTimer[] pair = renderer.freezeClockRpc(hh, mm, 0);
+SetMediaClockTimer[] pair = ClockRpc.freezeLiteral(hh, mm);
 ```
 
-> ⚠ **待实车确认**：两步法下 `CLOCK3` 那一格到底会显示成 `16:21`
-> 还是别的东西（如 `00:16`）尚未验证。旧版一直用单步 PAUSE，
-> 全被拒，从没看到过真实渲染结果。
+> ✅ 已实测：两步法下那一格显示的就是 `16:21`（2026-11-22 之后的上线版本）。
+> 早期文档担心的「会不会显示成 `00:16`」没有发生。
 
 **更新规则**：到达时刻变了才重发。高德的 ETA 按分钟算，同一分钟内反复推送
 都是同一个值，所以不需要额外门槛。
 
 **触发时机**：导航数据每次推送都要检查一次 ETA。只在换歌时检查的话，
 一路导航下来到达时刻会永远停在第一次推送的那个值。
+
+> ⚠️ ETA 必须**直接读 `nav.etaClockNow()`**，不要读 `buildFrame()` 算好的
+> `navClockText` —— `setNavigation()` 里是先改数据、再同步推时钟，
+> 那时帧还没重算，会拿到上一帧的 ETA（首次导航时甚至是 null，白等一秒）。
+
+### 2.10 时钟格参数约束速查
+
+见 `AGENTS.md` §6.6.1（权威表）。要点：
+
+- 时间参数只给 `COUNTUP` / `COUNTDOWN`
+- `PAUSE` / `RESUME` / `CLEAR` 一律不带参数（带 = 被拒）
+- 定格读数 = 两步法，且走 `ClockDispatcher`
+- 分 / 秒 ≤ 59；`hours` 有效（0~59 兜底），真实上限待实测
 
 
 ---
@@ -863,7 +940,7 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 |---|---|---|
 | 数据采集（音乐通知 / 高德导航） | `SyncPlayCore` | ✅ 正常 |
 | 渲染与**屏幕预览**（`StateRenderer` + `ScreenFrame` + `ScreenPreviewView`） | `SyncPlayCore` / 独立预览器 | ✅ 正常 |
-| **计时器**（正/倒/暂停/清零） | `SyncPlayCore.doTimer()` | ✅ 本地状态生效、预览正确；RPC 记 pending |
+| **计时器**（正/倒/暂停/清零） | `SyncPlayCore.doTimer()` | ✅ 本地状态生效、预览正确；没连接时不发，回 FULL 由 `pushClockForce()` 重投 |
 | **导航模式**开关 | `SyncPlayCore` | ✅ 正常 |
 | 歌词加载与缓存 | `SyncPlayCore` | ✅ 正常 |
 | 发 RPC / 重置连接 / 软键测试 | `SdlService` | ❌ 报「服务未启动」是正确的 |
@@ -873,23 +950,28 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 点计时器就变成「服务未启动」直接 return —— **连屏幕预览都不动了**。
 
 修复：计时器搬进 `SyncPlayCore`，内部拆成三步
-「① 更新本地状态 → ② 构造 RPC → ③ 有连接才发，没连接记 pending」，
-连上后由 `SdlService.initializeForConnection()` 调 `resendTimerIfPending()` 补发。
+「① 更新本地状态 → ② 构造 RPC 交 `ClockDispatcher` → ③ 有连接才发」。
+没连接时只留本地状态、不发；回到 FULL 由 `pushClockForce()` 按状态重投。
+
+> 2026-11-27：原先还有 `timerPendingSend` 与 `SdlService.pendingTimerResend` 两套补发标记，
+> 加上 `StateRenderer` 的节流指纹三方互相兜底，谁也说不清算哪条生效，已全部删除，
+> **只保留 `pushClockForce()` 这一条路径**。
 
 > 另外 `setTimerState()` 曾漏了 `markDirty()`（`setTimerRunning()` 有、它没有），
 > 导致点了计时器只有 RPC 发出去、`lastFrame` 不重建，预览那一格不动 —— 一并修了。
 
-#### 5.10.1 计时器那一格显示什么（四条硬规则）
+#### 5.10.1 计时器那一格显示什么（历史坑）
 
-媒体时钟格（mm:ss）的取值优先级：**用户计时器 > 导航 ETA > 音乐播放时间 > 空**。
-
-踩过的三个坑（2026-11-21 全部修复并实测）：
+**优先级矩阵见 §2.8**（唯一口径）。这一节只留踩过的坑与修法：
 
 | 现象 | 根因 | 修法 |
 |---|---|---|
 | **暂停音乐，秒数还在往上爬** | 取指令的回退分支「沿用上一条还在走的指令」把播放计时也沿用了 | 音乐暂停时显式构造 `PAUSE` 定格在最后位置，不再靠沿用 |
 | **正计时清零后，不回落到播放时间** | 同上：回退分支拿到旧指令，没走到"播放时间"那条 | 回退分支改为直接返回 `none()`；播放时间分支条件放宽成"只要有歌数据" |
 | **倒计时 5 分暂停，显示 00:10 而不是 04:50** | `setTimerState()` 在方法最前面无条件写 `timerH/M/S` 和 `timerCountdown`，点「暂停」时传的是 `(0,0,0,"PAUSE")`，起始值和方向都被冲掉 | 只有 `COUNTUP` / `COUNTDOWN`（开始）才允许重置方向与起始值；`PAUSE` 只停止走秒 |
+| **导航一开始，计时器就被 ETA 覆盖** | 判断用的是 `timerRunning`，暂停态会穿透到 ETA 分支 | 改按 `timerActive`（未清零即占屏），见 §2.8 |
+
+> 这些分支现在全都收敛进了 `ClockPlanner`，改行为只需要改那一个文件。
 
 **track 行的状态指示符：已移除**（2026-11-21）。
 
@@ -913,17 +995,21 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 - **第 3 格**：**「计时」（`9003`），文字固定不变**
 - **第 4 格**：「更多…」由车机自己画，不是我们下发的
 
-**计时键的三态循环**（`CommandRouter.handleTimerKey`）：
+**计时键的循环**（`CommandRouter.handleTimerKey`）：
 
 ```
-未激活 --点--> 正计时开始
-走秒中 --点--> 暂停（定格）
-暂停中 --点--> 清零
-清零后 --点--> 又开始正计时     ← 回到第一态
+未激活            --点--> 正计时开始
+倒计时已到 00:00   --点--> 清零          ← 到期后只有手动点才清（2026-11-27）
+走秒中            --点--> 暂停（定格）
+暂停中            --点--> 清零
+清零后            --点--> 又开始正计时    ← 回到第一态
 ```
 
-判定依据是 `StateRenderer.isTimerActive()` / `isTimerRunning()`，
-所以它同样能管住倒计时（先开机 5 分钟倒计时，按这个键也是"先暂停、再清零"）。
+判定顺序**必须先判到期**（`isTimerExpired()`）：倒计时走到 0 之后 `timerRunning`
+仍然是 true，顺序反了会把「清零」发成「暂停」。
+
+判定依据是 `StateRenderer.isTimerActive()` / `isTimerRunning()`（+ 到期判据），
+所以它同样能管住倒计时（先开 5 分钟倒计时，按这个键也是"先暂停、再清零"）。
 
 **高亮**：用 SDL 的 `SoftButton.setIsHighlighted(true)`。
 
@@ -959,20 +1045,20 @@ $ adb shell cmd package query-receivers -a sdl.router.startservice
 暂停时刻 `timerPausedAt`、`timerRunning` / `timerActive`。
 
 回到 FULL 时 `SyncPlayCore.pushClockForce()` → `StateRenderer.invalidateClockCache()`
-清掉节流缓存 → `timerClockList()` 按本地状态重算读数并重投：
+清掉指纹 → `ClockPlanner` 按本地状态重算读数并重投：
 
 | 状态 | 投递 |
 |---|---|
-| 在跑 | 一条 `COUNTUP(当前读数)`，车机接着走 |
+| 在跑 | 一条 `COUNTUP` / `COUNTDOWN`（当前读数，车机接着走） |
 | 暂停 | **两步**：`COUNTUP(当前读数)` + `PAUSE`（绝不能单发 PAUSE + startTime） |
-| 倒计时已走完 | 自动清除本地状态，时钟格回落 ETA / 播放时间 |
+| 倒计时已走完 | **保留 `00:00`**，不自动清除；等用户手动点「计时」键才 CLEAR（§2.8.2） |
 
 > ⚠ `initializeForConnection()` 以前在 `lifecycle.isInitialized() == true` 时直接
 > `return` —— 而"从 BACKGROUND 回到 FULL"正好命中这一支，导致时钟补发根本没执行。
 > 现在两分支都会强制重推。
 
-节流：`timerClockKey`（`"读数|run/pause"`）保证同一状态只投一次；用户主动操作
-（`setTimerState`）和 `invalidateClockCache()` 会清掉它。
+节流：`lastClockFingerprint`（来自 `ClockPlanner.Plan#fingerprint`）保证同一状态只投一次；
+用户主动操作（`setTimerState`）和 `invalidateClockCache()` 会清掉它。
 
 ---
 

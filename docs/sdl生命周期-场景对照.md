@@ -391,7 +391,7 @@ FULL + 数据变化 → flush() → Show(含 softButtons) → 车机画出来
 | `sdlManager = null` + `lifecycle.onProxyClosed()` | 官方：manager 不可复用 |
 | `AmapLinkClient.setHeadUnitConnected(false)` | 省 CPU |
 | `menusBuilt = false` | 官方：断开后车机侧菜单/订阅**全删** |
-| `pendingTimerResend = true` | 回 FULL 补发 |
+| `pendingTimerResend`（2026-11-27 已删） | ~~回 FULL 补发~~ → 统一由 `SyncPlayCore.pushClockForce()` 按本地状态重投 |
 | `renderer.onDisconnected()` + `core.detachSender()` | 预览保留 |
 | `updateNotification()` → 「未连接（连接关闭）」 | 我们的补充，**已随通知移除** |
 | **`stopSelf()`** | 🟢 官方示例：`SdlService.this.stopSelf()` |
@@ -417,8 +417,9 @@ FULL + 数据变化 → flush() → Show(含 softButtons) → 车机画出来
 ④ 通知文案 → 「已连接（未选中）」
 ```
 
-**`onLostFocus()` 只做三件事**：`menusBuilt = false`、`renderer.onDisconnected()`、
-`pendingTimerResend = true`。**不 `stopSelf`** —— 用户可能再点回来。
+**`onLostFocus()` 只做两件事**：`menusBuilt = false`、`renderer.onDisconnected()`。
+**不 `stopSelf`** —— 用户可能再点回来。计时器状态留在本地，
+回 FULL 由 `pushClockForce()` 按状态重投（2026-11-27 起不再设 `pendingTimerResend` 标记）。
 
 **软键**：车机已切走，我们的软键不主动删也不会出现；回 FULL 时 `initializeForConnection()`
 重建后恢复。
@@ -545,10 +546,10 @@ if (sender == null || lifecycle == null || !lifecycle.canSendRpc()) return;   //
 
 软键 9003 是车机上操作计时器的**唯一入口**，纯本地状态驱动：
 
-- 状态在 `StateRenderer.timerMode`（正计时 / 暂停 / 清零），**不依赖连接**
-- 断电断连后仍是上次的样子（预览器能看到）
-- 断开期间改的计时器，`pendingTimerResend` 会在回 FULL 时补发
-- 车机失焦会终止正在跑的时钟 → 回 FULL 必须 `resendTimerIfNeeded()`
+- 状态在 `StateRenderer` 的 `timerActive / timerRunning / timerStartMillis`（**不依赖连接**）
+- 断电断连后仍是上次的样子（预览器能看到），倒计时到期也不会自动清
+- 断开期间改的计时器，回 FULL 时 `pushClockForce()` 按本地状态重投
+- 车机失焦会终止正在跑的时钟 → 回 FULL 必须重投（唯一路径 `pushClockForce()`）
 
 ---
 

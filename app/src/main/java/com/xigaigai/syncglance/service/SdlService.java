@@ -685,12 +685,6 @@ public class SdlService extends Service {
                         }
 
                         @Override
-                        public void sendSequential(
-                                java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
-                            sendRpcSequential(msgs);
-                        }
-
-                        @Override
                         public void sendWithAck(com.smartdevicelink.proxy.RPCMessage msg,
                                                 Runnable onDone) {
                             sendRpcWithAck((RPCRequest) msg, onDone);
@@ -858,60 +852,14 @@ public class SdlService extends Service {
         return true;
     }
 
-    /**
-     * 按顺序发一串 RPC —— <b>等上一条响应回来才发下一条</b>。
+    /*
+     * 这里曾有 sendRpcSequential()，用 SDL 的 sendSequentialRPCs 发两步法。
      *
-     * <p>为什么必须有序：车机的 {@code PAUSE} 会忽略 {@code startTime}，
-     * 只暂停"当前正在跑的那块表"。所以「把时钟定在某个读数」= 先
-     * {@code COUNTUP(startTime)} 起表、再 {@code PAUSE} 停住 ——
-     * 两条并发发出去的话，PAUSE 可能先到，就会被拒或者停错表。</p>
-     *
-     * <p>用 SDL 的 {@code sendSequentialRPCs}：它内部等每条的 response
-     * （无论成功失败）再发下一条，正是我们要的语义。</p>
+     * 2026-11-27 删除。它只保证「一次调用内」有序 —— 两次独立调用之间仍会交错
+     * （导航 ETA 的两步法和计时器的两步法撞在一起），而车机那边只有一块表。
+     * 现在所有时钟指令都走 display/ClockDispatcher：单 in-flight、逐条等响应、
+     * 新批次覆盖排队旧批次。
      */
-    public void sendRpcSequential(java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
-        if (msgs == null || msgs.isEmpty()) return;
-        if (sdlManager == null) {
-            Log2.w(TAG, "✗ 未连接，丢弃 " + msgs.size() + " 条有序 RPC");
-            return;
-        }
-        if (!lifecycle.canSendRpc()) {
-            Log2.w(TAG, "✗ 当前 " + lifecycle.describe() + "，不能发有序 RPC（需 HMI_FULL）");
-            return;
-        }
-        try {
-            java.util.List<com.smartdevicelink.proxy.RPCMessage> list = new java.util.ArrayList<>(msgs);
-            for (com.smartdevicelink.proxy.RPCMessage m : list) {
-                Log2.i(TAG, "→ (seq) " + m.getFunctionName());
-                logRawJson("→", m);
-            }
-            sdlManager.sendSequentialRPCs(list,
-                    new com.smartdevicelink.proxy.rpc.listeners.OnMultipleRequestListener() {
-                @Override
-                public void onUpdate(int remainingRequests) {
-                    // 还有几条没发完（库每发完一条调一次）
-                }
-
-                @Override
-                public void onFinished() {
-                    Log2.i(TAG, "有序 RPC 发完（共 " + list.size() + " 条）");
-                }
-
-                @Override
-                public void onResponse(int correlationId, RPCResponse response) {
-                    if (response == null) return;
-                    Log2.rawMsg("←", response);
-                    if (!response.getSuccess()) {
-                        Log2.w(TAG, "(seq) " + response.getFunctionName() + " ← "
-                                + response.getResultCode()
-                                + (response.getInfo() == null ? "" : " " + response.getInfo()));
-                    }
-                }
-            });
-        } catch (Exception e) {
-            Log2.e(TAG, "有序发送失败", e);
-        }
-    }
 
     private void logRawJson(String dir, com.smartdevicelink.proxy.RPCMessage m) {        if (!Log2.isRawEnabled() || m == null) return;
         try {

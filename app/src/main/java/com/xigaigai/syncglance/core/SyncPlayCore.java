@@ -118,13 +118,6 @@ public final class SyncPlayCore {
                 }
 
                 @Override
-                public void sendSequential(
-                        java.util.List<? extends com.smartdevicelink.proxy.RPCMessage> msgs) {
-                    StateRenderer.Sender s = sender;
-                    if (s != null) s.sendSequential(msgs);
-                }
-
-                @Override
                 public void sendWithAck(com.smartdevicelink.proxy.RPCMessage msg, Runnable onDone) {
                     StateRenderer.Sender s = sender;
                     if (s != null) s.sendWithAck(msg, onDone);

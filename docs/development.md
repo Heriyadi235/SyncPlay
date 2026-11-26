@@ -1099,10 +1099,10 @@ android.useAndroidX=true
 | 暂停/继续 | `NeteaseControl.toggle()` | — （系统媒体按键） |
 | 高德地图 | `launchAmapAndConnect()` | `AmapLinkClient.wakeUp()`（已连接时跳过） |
 | 回家 / 去公司 | `navigateTo()` | 拉起高德 amapuri |
-| 正计时 | `doTimer(0,0,0,"COUNTUP")` | `SetMediaClockTimer` |
-| 倒计时 | `doTimer(0,m,s,"COUNTDOWN")`，上限 `59:59` | `SetMediaClockTimer` |
-| 暂停计时 | `doTimer(0,0,0,"PAUSE")` | `SetMediaClockTimer`（带 startTime，定格显示） |
-| 清零 | `doTimer(0,0,0,"CLEAR")` | `SetMediaClockTimer` |
+| 正计时 | `doTimer(0,0,0,"COUNTUP")` | `SetMediaClockTimer`（`COUNTUP`） |
+| 倒计时 | `doTimer(h,m,s,"COUNTDOWN")`，可到 `59:59:59` | `SetMediaClockTimer`（`COUNTDOWN`） |
+| 暂停计时 | `doTimer(0,0,0,"PAUSE")` | 两步法 `COUNTUP(定格读数)` + `PAUSE` |
+| 清零 | `doTimer(0,0,0,"CLEAR")` | 不直接发 CLEAR：由 `ClockPlanner` 一步算出回落目标（ETA / 播放时间 / CLEAR） |
 | 导航模式 | `setManualNavMode()` | — （本地状态） |
 | 软键测试 | `setSoftKeyCount(1~6)` | — （改变 Show 里 softButtons 数量） |
 | 键位设置 | `KeyMap.bind()` | — （SharedPreferences） |
@@ -1138,7 +1138,11 @@ app/src/main/java/com/xigaigai/syncglance/
 ├── display/
 │   ├── StateRenderer.java         四状态渲染 + 节流
 │   ├── SyncLifecycle.java         HMI 状态机
-│   └── ScreenPreviewView.java     车机屏幕预览
+│   ├── ScreenPreviewView.java     车机屏幕预览
+│   ├── ClockRpc.java              SetMediaClockTimer 唯一构造入口（守住"PAUSE 不带时间"）
+│   ├── ClockPlanner.java          时钟格显示优先级（纯逻辑，无 Android 依赖）
+│   ├── ClockDispatcher.java       时钟指令单 in-flight 串行队列
+│   └── ClockInstruction.java      预览用"指令"（预览器自己走表）
 ├── nav/
 │   ├── AmapLinkClient.java        高德 AIDL 通信
 │   └── LinkEnvelope.java          AES-GCM 信封解密
@@ -1264,27 +1268,36 @@ builder.setTransportType(new MultiplexTransportConfig(ctx, APP_ID));
 
 **真正能显示时间的是 `SetMediaClockTimer` RPC**，输出在**第 3 行右侧**。
 
-### 8.4.1 媒体时钟格只有 `mm:ss`，没有小时位
+### 8.4.1 媒体时钟格：**有**小时位（2026-11-27 更正）
 
-这是踩了很多次才定下来的硬约束，所有 `StartTime` 都必须遵守：
+> ⚠️ 本节旧结论（"那一格只有 `mm:ss`、`hours` 必须为 0、否则 REJECTED"）**已被推翻**。
+> 2026-11-27 上车重测：`startTime.hours` 生效，车机能渲染 `1:23:45`。
+
+新结论：
 
 | 实测输入 | 结果 |
 |---|---|
-| `hours=0, minutes≤59` | SUCCESS |
-| `hours=16, minutes=21` | **REJECTED** |
-| `minutes=99` | **INVALID_DATA** |
-| `COUNTUP` / `CLEAR` | SUCCESS |
+| `hours=0, minutes≤59` | SUCCESS（`mm:ss`） |
+| `hours=1..59` | SUCCESS，渲染成 `h:mm:ss`（`1:23:45`） |
+| `minutes=99` / `seconds=99` | **INVALID_DATA** |
+| `COUNTUP` / `COUNTDOWN` 带 `startTime` | 生效，从给定时间起表 |
+| `PAUSE` / `RESUME` / `CLEAR` **带** `startTime`/`endTime` | **被拒**（这是真正必须守住的约束） |
 
-照片实测那一格渲染成 `1:55`（分:秒），确认没有小时位。
+旧结论怎么来的：早期测的是 `StartTime(16, 21, 0)`（hours=16）被拒，
+但那时的写法是**单条 `PAUSE + startTime`** —— 车机根本不看时间参数，拒绝与 hours 无关。
+后来改成两步法（`COUNTUP` + `PAUSE`）才发现 hours 一直是好的。
+教训：**一条指令被拒时，先怀疑"这条指令的语义对不对"，再怀疑参数范围。**
 
-**两个直接后果：**
+**两个后果（已按新结论实现）：**
 
-1. **ETA 要借用 mm:ss 位**：到达时刻 `16:21` 不能发 `StartTime(16,21,0)`，
-   要发 `StartTime(0,16,21)`，车机才会原样渲染成 `16:21`。
-2. **倒计时上限 59:59**：分钟滚轮只到 59，因为 60 分以上无处安放。
+1. **ETA 仍借 mm:ss 位**：这是**保留的**设计（`StartTime(0,16,21)` → 渲染 `16:21`），
+   与"有没有小时位"无关 —— 因为 ETA 要的是"到达时刻"，不是"时长"。
+   代价是同一格有两种语义，靠「有没有小时段」区分。
+2. **倒计时不再限制 59:59**：界面给「时 / 分 / 秒」三个滚轮，小时 0~59。
 
-`SdlService.clockTime(h,m,s)` 是所有 `StartTime` 的唯一出口：
-统一把 hours 压成 0，超过 3599 秒的夹到 59:59。宁可停格，也不要被车机整条拒掉。
+**现在所有 `StartTime` 的唯一出口是 `display/ClockRpc.time(h,m,s)`**：
+分 / 秒归一到 0~59，`hours` 保留真实值（只按协议上限 59 兜底）。
+`ClockRpc.freezeLiteral(hh,mm)` 是 ETA 借位的专用入口，不走时长换算。
 
 ### 8.5 `mediaTrack` 两屏共用
 
@@ -2138,9 +2151,10 @@ $adb = "C:\Users\<用户名>\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 
 ### 14.6 计时器
 
-- [ ] 正计时：车机第 3 行右侧数字在**走**
-- [ ] 倒计时：滚轮选**分:秒** → 车机倒计时，**上限 59:59**（分钟滚轮只到 59）
+- [ ] 正计时：车机第 3 行右侧数字在**走**；走过 `59:59` 后是否继续显示 `1:00:00`
+- [ ] 倒计时：滚轮选**时:分:秒** → 车机倒计时；先测 `1:00:00`，再测上限 `59:59:59`
 - [ ] **暂停时那一格仍然显示计时值**（不能被清空）
+- [ ] **倒计时到 `00:00` 后停在屏上**，点底栏「计时」键才清掉
 - [ ] **暂停时 mediaTrack 前的指示符变成 `⧗`**
 - [ ] 继续 / 清零都正常
 - [ ] **计时器激活时，ETA 和播放进度都让位**

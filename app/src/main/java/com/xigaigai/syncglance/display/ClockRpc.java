@@ -97,7 +97,7 @@ public final class ClockRpc {
      *   [0] COUNTUP(startTime=读数)   起一块表
      *   [1] PAUSE                     停住
      * </pre>
-     * 两条必须按顺序发（见 {@link StateRenderer.Sender#sendSequential}）。
+     * 两条必须按顺序发（见 {@link ClockDispatcher}）。
      *
      * @return 长度固定为 2 的数组
      */

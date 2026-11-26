@@ -37,8 +37,10 @@
 
 - **歌词**：带时间轴自动跟随，一行 7 汉字宽，长句折两行、超屏按时长翻页
 - **导航**：高德 AmapLink（AIDL + AES-GCM）取转向/路名/剩余距离/ETA，导航结束或 8 秒无数据自动降级
-- **计时器**：正计时 / 倒计时（上限 59:59）/ 暂停 / 清零，暂停时数字定格在屏上
-- **时钟格**：`SetMediaClockTimer` 只支持 `mm:ss`，ETA 借用分秒位显示到达时刻
+- **计时器**：正计时 / 倒计时（时:分:秒，可设到 59:59:59）/ 暂停 / 清零，暂停时数字定格在屏上；
+  倒计时走到 `00:00` 不自动清屏，点一下车机底栏「计时」键才清
+- **时钟格**：`SetMediaClockTimer` 实测**有小时位**（能显示 `1:23:45`），
+  导航 ETA 仍借分秒位显示到达时刻（`16:21`）
 - **交互**：3 个父菜单 + 12 个子项、15 个物理键（OK 与 PLAY_PAUSE 是同一物理键，已做别名去重）、底栏软键
 - **调试**：手机端车机屏幕预览、通信日志（含原始 JSON，可复制/分享）
 
@@ -103,7 +105,8 @@ $pkg = "com.xigaigai.syncglance"
 | 只有 `HMI_FULL` 能发 RPC | 其他等级发出去直接抛「没有有效连接」 |
 | `mediaTrack` 两屏共用一个值 | SYNC 协议限制，无法分屏 |
 | 一行只有 **7 个汉字 = 14 半角** | 实车照片实测（字段声明的 width=40 是假的） |
-| 时钟格没有小时位 | `StartTime(h,m,s)` 的 h 必须为 0，否则 `REJECTED` |
+| `SetMediaClockTimer`：`PAUSE`/`RESUME`/`CLEAR` 不能带时间参数 | 带了必被拒；定格读数要两步法（`COUNTUP` → `PAUSE`），见 [AGENTS.md §6.6.1](AGENTS.md) |
+| 时钟格**有**小时位 | `startTime.hours` 实测有效（`1:23:45`）；ETA 仍借 `mm:ss` 位显示 `16:21` |
 | 车机不认 ⧗ ▶ ⏸ 和箭头 | 点阵字库缺字形，会渲染成「·」；统一由 `Glyphs.ENABLED` 控制 |
 | 日文转写走 kuromoji 分词 | 不是逐字加空格；规则见 [design.md §2.5.1](docs/design.md)，别自己加空格 |
 | 软键靠 `Show.softButtons` | **不是** `AddCommand`；回调走 `OnButtonPress{CUSTOM_BUTTON}` |

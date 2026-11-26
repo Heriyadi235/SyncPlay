@@ -66,24 +66,20 @@ public class StateRenderer {
      *   这样"看到真正发出去的载荷"这个调试能力不会丢。
      */
     public interface Sender {
+        /** 发一条普通 RPC（Show 等），不等响应 */
         void send(RPCMessage msg);
-
-        /**
-         * 按顺序发一串 RPC：<b>等上一条响应回来（无论成功失败）才发下一条</b>。
-         *
-         * <p>时序敏感的指令必须走这个 —— 例如「先 COUNTUP 起表、再 PAUSE 停住」
-         * （见 {@link ClockRpc#freezeDuration}）。如果两条并发发出去，
-         * PAUSE 可能比 COUNTUP 先到，就会停错表或者因为没有表在跑而被拒。</p>
-         */
-        void sendSequential(java.util.List<? extends RPCMessage> msgs);
 
         /**
          * 发一条，并在「车机响应回来（成功/失败都算）」之后回调 {@code onDone}。
          *
          * <p>由 {@link ClockDispatcher} 用来把<b>所有</b>时钟指令排成一条队列 ——
-         * 光靠 {@link #sendSequential} 不够：两次独立的时序序列（比如 ETA 的两步法
-         * 和计时器的两步法）并发发出时，它们的 COUNTUP/PAUSE 仍会交错。
-         * 实现方必须保证 {@code onDone} 最多被调用一次；没连车机时立即回调。</p>
+         * 两步法（`COUNTUP` 起表 → `PAUSE` 停住）必须严格按序，而且不能被
+         * 别的时钟指令插队。实现方必须保证 {@code onDone} 最多被调用一次；
+         * 没连车机时立即回调。</p>
+         *
+         * <p>2026-11-27：原来的 {@code sendSequential} 已删除 —— 它只保证「一次调用内」
+         * 有序，两次调用之间仍会交错，正是「定格读数错乱」的根源；现在统一走
+         * {@link ClockDispatcher}。</p>
          */
         void sendWithAck(RPCMessage msg, Runnable onDone);
     }
@@ -999,12 +995,6 @@ public class StateRenderer {
     private volatile boolean timerCountdown = false;
     private volatile long timerPausedAt = 0;
 
-    public void setTimerRunning(boolean running) {
-        this.timerRunning = running;
-        if (running) timerActive = true;      // 开始走 = 一定存在
-        markDirty("timerState");
-    }
-
     public boolean isTimerRunning() { return timerRunning; }
 
     /** 计时器是否还「占着」屏幕（含暂停态） */
@@ -1092,12 +1082,6 @@ public class StateRenderer {
         lastClockFingerprint = null;
         markDirty("timerState");
     }
-
-    public long getTimerStartMillis() { return timerStartMillis; }
-    public int getTimerStartHours() { return timerH; }
-    public int getTimerStartMinutes() { return timerM; }
-    public int getTimerStartSeconds() { return timerS; }
-    public boolean isTimerCountdown() { return timerCountdown; }
 
     /**
      * 计算当前应显示的计时器秒数（正计时=已过秒数，倒计时=剩余秒数）。
@@ -1193,7 +1177,7 @@ public class StateRenderer {
         }
     }
 
-    /** 可变列表小工具（{@code sendSequential} 需要 List） */
+    /** 可变列表小工具（{@link ClockDispatcher} 要 List） */
     private static java.util.List<SetMediaClockTimer> asList(SetMediaClockTimer... rpcs) {
         java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(rpcs.length);
         java.util.Collections.addAll(out, rpcs);
@@ -1254,42 +1238,12 @@ public class StateRenderer {
         lastClockFingerprint = null;
     }
 
-    /** "歌名 - 歌手" 格式，给 mediaTrack 用 */
-    private String songLabel() {
-        if (song == null || !song.hasData()) return "";
-        StringBuilder sb = new StringBuilder();
-        if (notEmpty(song.title)) sb.append(song.title);
-        if (notEmpty(song.artist)) {
-            if (sb.length() > 0) sb.append(" - ");
-            sb.append(song.artist);
-        }
-        return sb.toString();
-    }
-
-    private static boolean notEmpty(String s) { return s != null && !s.trim().isEmpty(); }
-
-    /**
-     * track 行显示的文字。
-     *
-     * 计时器存在（走秒或暂停）→ 返回 null（让计时器独占那一行）
-     * 计时器没跑 → 返回歌曲播放时间 "00:00"
+    /*
+     * 这里曾有 songLabel() / playTimeText() / fmtTime() / notEmpty() 四个小工具：
+     * 分别拼「歌名 - 歌手」、把播放进度塞进 track 行、格式化毫秒。
+     * 2026-11-27 清理：都没有调用方了（track 行早已改放导航距离或最干净歌名，
+     * 播放进度改由 SetMediaClockTimer 显示），删掉以免被误用。
      */
-    private String playTimeText() {
-        if (timerActive) return null;           // 计时器占用（含暂停态）
-        if (song == null || !song.hasData()) return "";
-        long pos = song.positionMs;
-        if (pos <= 0) return "";
-        long total = pos / 1000;
-        return String.format(java.util.Locale.US, "%02d:%02d", total / 60, total % 60);
-    }
-
-    private static String fmtTime(long ms) {
-        if (ms < 0) ms = 0;
-        long total = ms / 1000;
-        long m = total / 60;
-        long s = total % 60;
-        return String.format(java.util.Locale.US, "%d:%02d", m, s);
-    }
 
     // ---------------- track 状态指示符 ----------------
 
@@ -1439,23 +1393,6 @@ public class StateRenderer {
 
     // ---------------- 字符工具 ----------------
 
-    /** 统计"汉字个数"（英文不计） */
-    private static int charCount(String s) {
-        if (s == null) return 0;
-        int count = 0;
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            count += isWideChar(c) ? 1 : 0;
-        }
-        // 全是英文的情况按字符数算
-        if (count == 0) return s.length();
-        return count;
-    }
-
-    private static boolean isWideChar(char c) {
-        return (c >= 0x4E00 && c <= 0x9FFF)      // 汉字
-                || (c >= 0x3400 && c <= 0x4DBF)
-                || (c >= 0x3040 && c <= 0x30FF)  // 假名
-                || (c >= 0xFF00 && c <= 0xFF60);
-    }
+    // 字符宽度统计已移除：唯一使用者是上面的 charCount()（无人调用）。
+    // 需要"半角单位"宽度时用 SyncLyric / ScreenPreviewView 里那份实现。
 }
