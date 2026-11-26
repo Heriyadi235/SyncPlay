@@ -51,7 +51,7 @@
 │  AmapLinkClient      ─→ Navigation    （高德 AIDL + AES-GCM）     │
 │  LyricManager        ─→ 歌词           （music.163.com / lrclib）  │
 │                          ↓                                       │
-│  StateRenderer（四状态 + 1 秒节流）                               │
+│  StateRenderer（四状态 + 内容去重，变了就上屏）                    │
 │  SyncLifecycle（只有 HMI_FULL 才允许发 RPC）                      │
 └───────────────────────────────┬──────────────────────────────────┘
                                 │ attachSender() 挂上 / detachSender() 摘除

@@ -676,7 +676,10 @@ private static final long POSITION_POLL_MS = 900;
 private final Runnable positionTicker = ... // 构造时启动
 ```
 
-900ms 而不是 1000ms，是为了和 `Show` 的 1 秒节流错开，避免每次都刚好卡在边界上。
+900ms 而不是 1000ms，是为了和当时 `Show` 的 1 秒节流错开，避免每次都刚好卡在边界上。
+
+> ⚠ 2026-11-26 起 `Show` 的 1 秒节流**已取消**（改成「内容没变就不发」），
+> 这个 900ms 现在只是普通轮询间隔，不必再和谁错开。
 
 实测（不开预览页）：
 
@@ -962,17 +965,30 @@ return SyncLyric.splitTwo(Romaji.convert(page[0]).trim());
 
 ### 4.6 防刷屏节流
 
-**`Show` 有 4 秒硬限流：**
+**现在的做法（2026-11-26 起）：不再限最小间隔，只做「内容去重」。**
 
 ```java
-private static final long MIN_INTERVAL_MS = 4200;
-
-// 状态变了只标记 dirty，由定时器统一调度
+// 状态变了只标记 dirty，由 schedule() 统一调度（带 20ms 防抖）
 private void markDirty(String why) {
     dirty = true;
     schedule();
 }
+
+// doShow()：算出一帧 → 内容没变就不发
+if (payload.equals(lastPayload)) { dirty = false; return; }
 ```
+
+`payload` 覆盖四行文本 + `mediaTrack` + 软键文案，所以「没变就不发」是精确的。
+
+> 演进过程（都是实测结论，别再回头踩）：
+> - 最早按 Ford 1.6 文档「Show 4 秒一次」→ `MIN_INTERVAL_MS = 4200`
+> - 实测这台车机（固件 5.11）1 秒一次完全没问题 → 收到 `1000`
+> - **2026-11-26 彻底取消**：导航距离改成按量级取整后，payload 的变化频率
+>   天然被压低了，1 秒间隔只剩副作用 —— 给每次变化加最多 1 秒延迟。
+>   现在换歌/换歌词行/导航转弯都是**立刻**上屏。
+>
+> 万一将来发现车机扛不住突发（Show 被丢 / 闪一下），把最小间隔加回来即可
+> （git 历史里有）。
 
 **高德数据推送节流**：`AmapLinkClient` 最多每 2 秒推一次给显示层。
 
@@ -1236,9 +1252,11 @@ builder.setTransportType(new MultiplexTransportConfig(ctx, APP_ID));
 
 **解决**：`adb shell pm uninstall --user 900 <包名>`
 
-### 8.3 `Show` 限流是 1 秒
+### 8.3 `Show` 不需要限流（曾经以为是 1 秒）
 
-旧文档写的 4.2 秒是过时限制，实车按 1 秒节流即可（`StateRenderer.MIN_INTERVAL_MS = 1000`）。
+旧文档写「4.2 秒硬限流」，实测这台车机 1 秒一次也没问题，
+**2026-11-26 起连 1 秒间隔也取消了** —— 只保留「内容没变就不发」。
+详见 §4.6。
 
 ### 8.4 `mediaClock` 参数无效
 

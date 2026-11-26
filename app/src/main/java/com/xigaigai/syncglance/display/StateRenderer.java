@@ -38,13 +38,11 @@ import java.util.List;
 public class StateRenderer {
 
     private static final String TAG = "Render";
-    /**
-     * Show 的最小间隔。
-     *
-     * Ford 1.6 文档写的是"4 秒一次"，但那是旧版车机的限制。
-     * 实测这台车机（固件 5.11）支持 1 秒一次刷新，所以按 1 秒节流。
+    /*
+     * 曾有 `MIN_INTERVAL_MS = 1000`（Show 最小间隔 1 秒）——
+     * 2026-11-26 取消：payload 去重 + 导航距离取整已经足够压频率，
+     * 留着它只会给每次变化加最多 1 秒延迟。详见 flush 里那段说明。
      */
-    private static final long MIN_INTERVAL_MS = 1000;
     /** 非 FULL 状态下的重试间隔 */
     private static final long RETRY_WHEN_NOT_FULL_MS = 1500;
 
@@ -194,7 +192,6 @@ public class StateRenderer {
 
     // ---- 节流 ----
     private boolean dirty = true;
-    private long lastShowAt = 0;
     private String lastPayload;
     /** 避免反复打印同一条"不能发送"日志 */
     private boolean warnedNotFull = false;
@@ -237,13 +234,28 @@ public class StateRenderer {
             }
             warnedNotFull = false;
 
-            long now = System.currentTimeMillis();
-            long wait = MIN_INTERVAL_MS - (now - lastShowAt);
-            if (wait > 0) {
-                main.removeCallbacks(flush);
-                main.postDelayed(flush, wait);
-                return;
-            }
+            /*
+             * ★ 2026-11-26：**取消了「Show 最小间隔 1 秒」这个节流**。
+             *
+             *   原来的写法是
+             *     wait = MIN_INTERVAL_MS - (now - lastShowAt); if (wait > 0) 延后再来
+             *   目的是防止刷屏（Ford 1.6 文档说 4 秒一次，实测这台车机 1 秒没问题，
+             *   所以当时按 1 秒节流）。
+             *
+             *   现在不需要它了，因为「内容没变就不发」这道闸门已经够用：
+             *     · doShow() 里有 payload 去重（`payload.equals(lastPayload)` 直接返回）
+             *     · 导航距离已按量级取整（<50m 精确，50~999m 每 50m，≥1km 每 0.1km），
+             *       所以 payload 的变化频率天然被压低了
+             *
+             *   去掉的收益：**延迟没了**。以前任何变化最多要等 1 秒才上屏；
+             *   现在数据一变（换歌、换歌词行、导航转弯）立刻发。
+             *
+             *   仍然保留的两道保护：
+             *     ① schedule() 里的 20ms 防抖（同一批数据变化合并成一次）
+             *     ② doShow() 的 payload 去重
+             *   万一将来发现车机扛不住突发（Show 被丢 / 闪一下），
+             *   就把这里的最小间隔加回来 —— 代码在 git 历史里。
+             */
             doShow();
         }
     };
@@ -556,7 +568,6 @@ public class StateRenderer {
     /** 断开连接时清掉上次的显示缓存，重连后强制重绘 */
     public void onDisconnected() {
         lastPayload = null;
-        lastShowAt = 0;
         warnedNotFull = false;
         dirty = true;
     }
@@ -666,7 +677,6 @@ public class StateRenderer {
 
         try {
             sender.send(s);
-            lastShowAt = System.currentTimeMillis();
             lastPayload = payload;
             dirty = false;
             Log2.i(TAG, "Show[" + frame.stateLabel + "] " + frame.f1 + " / " + frame.f2
