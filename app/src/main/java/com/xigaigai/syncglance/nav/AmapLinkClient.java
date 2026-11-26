@@ -1005,10 +1005,31 @@ public class AmapLinkClient {
         }
     }
 
-    /** 距离格式化：1500 → 1.5 km，850 → 850 m */
+    /**
+     * 距离格式化，**按量级分档取整**。
+     *
+     * <h3>为什么不用精确到米（2026-11-26 改）</h3>
+     * 高德每秒推一次「段剩余/全程剩余」，如果显示到米，`Show` 的 payload 每秒都变
+     * → 每秒一条 Show RPC。长途实测：20 秒里发了 18 条 Show（全部 SUCCESS，
+     * 功能没问题，但纯属浪费蓝牙带宽）。
+     *
+     * <p>分档后 100~999 m 每 50 m 才变一次（60 km/h 下约 3 秒一次），
+     * 1 km 以上每 100 m 变一次，Show 频率降到原来的 1/3 ~ 1/6。
+     * 另外「350 m」比「347 m」在 4 寸屏上也更好读。</p>
+     *
+     * <table>
+     *   <tr><td>&lt; 50 m</td><td>精确到 1 m —— 马上要转弯，需要精度</td></tr>
+     *   <tr><td>&lt; 1000 m</td><td>50 m 一档</td></tr>
+     *   <tr><td>≥ 1000 m</td><td>0.1 km</td></tr>
+     * </table>
+     *
+     * <p>注意：{@code Navigation.remainDistanceMeters} 仍然保存**原始米数**，
+     * ETA 等计算不受影响 —— 只有给人看的那两个字符串被取整。</p>
+     */
     private static String formatDistance(long meters) {
         if (meters < 0) return "";
-        if (meters < 1000) return meters + " m";
+        if (meters < 50) return meters + " m";
+        if (meters < 1000) return (Math.round(meters / 50.0) * 50) + " m";
         return String.format(java.util.Locale.US, "%.1f km", meters / 1000.0);
     }
 

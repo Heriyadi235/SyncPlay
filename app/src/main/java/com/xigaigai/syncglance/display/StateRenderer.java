@@ -605,6 +605,14 @@ public class StateRenderer {
     /** 上一次用于预览的计时器指令（用来沿用 issuedAtMs，避免每次都把走表起点重置） */
     private volatile ClockInstruction lastClock = ClockInstruction.none();
 
+    /**
+     * 上一帧时钟格是否被计时器接管 —— 只为让「计时器已结束」这行日志只打一次。
+     *
+     * <p>见 {@code pushClock()} 里那段说明：本方法在导航期间每秒被调用一次，
+     * 无条件打日志会刷屏。</p>
+     */
+    private boolean lastTimerOccupying = false;
+
     private void doShow() {
         // ① 先把「这一帧是什么」算出来 —— 无论能不能发
         ScreenFrame frame = buildFrame();
@@ -1330,6 +1338,7 @@ public class StateRenderer {
          */
         TimerClockResult timer = timerClockList();
         if (timer.occupying) {
+            lastTimerOccupying = true;
             /*
              * 计时器接管时钟格。
              *
@@ -1346,7 +1355,18 @@ public class StateRenderer {
             return timer.rpcs;
         }
 
-        Log2.i(TAG, "计时器已结束，时钟格交回 ETA / 播放时间");
+        /*
+         * 只在「计时器从有到无」的那一刻打一次。
+         *
+         * ★ 2026-11-26：以前这行是无条件打的，而本方法（pushClock）在导航期间
+         *   每秒被调用一次（高德每秒推一次数据）→ 日志里「计时器已结束」每秒一条，
+         *   一次导航就刷上百条，把真正有用的信息淹了（长途实测 5.5 小时打了 305 条）。
+         *   功能上没有重复计算：下面的 ETA 分支有自己的节流（ETA 是 HH:mm，一分钟才变）。
+         */
+        if (lastTimerOccupying) {
+            lastTimerOccupying = false;
+            Log2.i(TAG, "计时器已结束，时钟格交回 ETA / 播放时间");
+        }
 
         // 导航模式优先显示 ETA
         if (navClockText != null && !navClockText.isEmpty()) {

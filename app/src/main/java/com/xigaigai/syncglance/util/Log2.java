@@ -68,8 +68,8 @@ public final class Log2 {
     private static final long FLUSH_INTERVAL_MS = 5_000;
     /** 攒多少字节落一次 */
     private static final int FLUSH_BYTES = 8 * 1024;
-    /** 文件上限，超了砍掉前半段 */
-    private static final long MAX_FILE_BYTES = 200 * 1024;
+    /** 文件上限；超了就**轮转**（见 {@link #rotateFile()}），不裁内容 */
+    private static final long MAX_FILE_BYTES = 10 * 1024 * 1024;
 
     private static java.io.File logFile;
     private static long lastFlushAt = 0;
@@ -161,7 +161,7 @@ public final class Log2 {
     private static void writeBatch(String batch) {
         if (logFile == null || batch == null || batch.isEmpty()) return;
         try {
-            if (logFile.length() + batch.length() > MAX_FILE_BYTES) trimFile();
+            if (logFile.length() + batch.length() > MAX_FILE_BYTES) rotateFile();
             try (java.io.FileOutputStream out =
                          new java.io.FileOutputStream(logFile, true)) {
                 out.write(batch.getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -169,34 +169,36 @@ public final class Log2 {
         } catch (Exception ignored) { }
     }
 
-    /** 文件超限时砍掉前半段，避免无限增长 */
-    private static void trimFile() {
-        java.io.FileInputStream in = null;
+    /**
+     * 文件超限时**轮转**，而不是裁掉前半段（2026-11-26 改）。
+     *
+     * <h3>为什么不再"砍一半"</h3>
+     * 旧实现有两个代价，都实测踩到了：
+     * <ol>
+     *   <li><b>会吃掉证据</b>：200KB 只装得下约 5.5 小时日志。一次长途驾驶
+     *       就把前两天的记录全冲掉了（2026-11-25/26 长途就是这么丢的）。</li>
+     *   <li><b>按字节切，会切碎整行</b>：从文件中间开始读，切点落在半个汉字上，
+     *       结果文件第一行变成了一个孤零零的 "m"。</li>
+     *   <li>上限提到 10MB 后，裁一次要分配 5MB 的 byte[]，白占内存。</li>
+     * </ol>
+     *
+     * <h3>轮转怎么做</h3>
+     * 当前文件改名成 {@code syncplay.1.log}（老的 .1 先删），然后从空文件继续写。
+     * 这样磁盘最多占 2 × MAX_FILE_BYTES，且**永远按整行边界**分割。
+     *
+     * <p>多进程安全：两个进程都是每次 flush 时新开
+     * {@code FileOutputStream(append=true)}，改名不影响已经打开的描述符
+     * （Android/Linux 下 inode 不变），所以 Router 进程不会因此丢日志。</p>
+     */
+    private static void rotateFile() {
         try {
-            long len = logFile.length();
-            if (len <= 0) return;
-            long skip = len / 2;
-            in = new java.io.FileInputStream(logFile);
-            long skipped = 0;
-            while (skipped < skip) {
-                long s = in.skip(skip - skipped);
-                if (s <= 0) break;
-                skipped += s;
-            }
-            byte[] tail = new byte[(int) (len - skipped)];
-            int read = 0;
-            while (read < tail.length) {
-                int n = in.read(tail, read, tail.length - read);
-                if (n <= 0) break;
-                read += n;
-            }
-            try (java.io.FileOutputStream out =
-                         new java.io.FileOutputStream(logFile, false)) {
-                out.write(tail, 0, read);
-            }
+            java.io.File dir = logFile.getParentFile();
+            if (dir == null) return;
+            java.io.File bak = new java.io.File(dir, "syncplay.1.log");
+            // 老备份删不掉就别动当前文件，继续追加总比丢日志好
+            if (bak.exists() && !bak.delete()) return;
+            if (logFile.exists() && !logFile.renameTo(bak)) return;
         } catch (Exception ignored) {
-        } finally {
-            try { if (in != null) in.close(); } catch (Exception ignored) { }
         }
     }
 
