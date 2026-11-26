@@ -194,10 +194,40 @@ public final class SyncPlayCore {
 
         // ① 先冻结本地状态（PAUSE 要靠它记下 timerPausedAt）
         renderer.setTimerState(h, m, s, mode);
-        // 用户计时器接管后，歌曲计时作废
-        renderer.resetSongClock();
 
-        // ② 构造 RPC（可能是 0~2 条：暂停定格需要 COUNTUP + PAUSE 两步）
+        /*
+         * ② CLEAR 不在这里发「显式指令」，交给下面的 pushClock() 决策。
+         *
+         *   清零之后这一格该显示什么，取决于当下有没有导航 / 有没有在播 ——
+         *   可能是 ETA、可能是播放时间、也可能真的该空着。以前这里固定发一条
+         *   CLEAR，然后等下一次事件才重推，于是「清零后那一格空着」会一直持续到
+         *   下一分钟 ETA 变化为止（有歌无导航时更久，因为通知不常来）。
+         *
+         *   现在由 ClockPlanner 一步算出来：要么直接切到 ETA / 播放时间，
+         *   要么发 CLEAR —— 中间不存在空白期。
+         */
+        if (!"CLEAR".equals(mode)) {
+            sendExplicitTimerRpc(h, m, s, mode);
+            /*
+             * 显式指令已按用户意图发出 → 把指纹同步过去，
+             * 免得紧接着的 pushClock() 把同一条指令再发一遍。
+             */
+            renderer.markClockFingerprintSynced();
+        }
+
+        // ③ 再按「现在该显示什么」决策一次：清零后立刻回落，其余情况被指纹挡住
+        pushClock();
+    }
+
+    /**
+     * 发送用户计时器的<b>显式</b>指令（开始 / 暂停定格 / 继续）。
+     *
+     * <p>为什么不走 {@link #pushClock()}：那不是「用户按了什么」的语义。
+     * 「继续」要发的是 {@code RESUME}（让车机接着走那块表），而 pushClock 只会
+     * 按当前读数重投一条 {@code COUNTUP}。两者显示效果一样，但 RESUME 更贴合协议、
+     * 也少一条指令。</p>
+     */
+    private void sendExplicitTimerRpc(int h, int m, int s, String mode) {
         java.util.List<SetMediaClockTimer> list;
         try {
             list = renderer.timerRpcList(h, m, s, mode);
@@ -207,7 +237,6 @@ public final class SyncPlayCore {
         }
         if (list == null || list.isEmpty()) return;
 
-        // ③ 有连接才发
         StateRenderer.Sender sn = sender;
         if (sn == null || !lifecycle.canSendRpc()) {
             timerPendingSend = true;

@@ -6,9 +6,7 @@ import android.os.Looper;
 import com.smartdevicelink.proxy.RPCMessage;
 import com.smartdevicelink.proxy.rpc.SetMediaClockTimer;
 import com.smartdevicelink.proxy.rpc.SoftButton;
-import com.smartdevicelink.proxy.rpc.StartTime;
 import com.smartdevicelink.proxy.rpc.Show;
-import com.smartdevicelink.proxy.rpc.enums.AudioStreamingIndicator;
 import com.smartdevicelink.proxy.rpc.enums.SoftButtonType;
 import com.smartdevicelink.proxy.rpc.enums.SystemAction;
 import com.smartdevicelink.proxy.rpc.enums.TextAlignment;
@@ -74,7 +72,7 @@ public class StateRenderer {
          * 按顺序发一串 RPC：<b>等上一条响应回来（无论成功失败）才发下一条</b>。
          *
          * <p>时序敏感的指令必须走这个 —— 例如「先 COUNTUP 起表、再 PAUSE 停住」
-         * （见 {@link #freezeClockRpc}）。如果两条并发发出去，
+         * （见 {@link ClockRpc#freezeDuration}）。如果两条并发发出去，
          * PAUSE 可能比 COUNTUP 先到，就会停错表或者因为没有表在跑而被拒。</p>
          */
         void sendSequential(java.util.List<? extends RPCMessage> msgs);
@@ -291,8 +289,7 @@ public class StateRenderer {
                                 + " 秒，自动降级到空闲/歌曲模式");
                         nav.clear();
                         navClockText = null;
-                        lastEtaSent = null;
-                        lastClockTextSent = null;
+                        lastClockFingerprint = null;
                         /*
                          * ★ 必须通知外部重推时钟。
                          *
@@ -396,7 +393,8 @@ public class StateRenderer {
     public void clearNavigation() {
         if (nav != null) nav.clear();
         navClockText = null;
-        lastEtaSent = null;
+        // 导航没了 → 时钟该回落，下一次 pushClock 必须重新决策
+        lastClockFingerprint = null;
         ensureTickers();
         markDirty("navClear");
     }
@@ -416,7 +414,8 @@ public class StateRenderer {
     public void clearSong() {
         this.song = null;
         this.lyrics = null;
-        resetSongClock();
+        // 歌没了 → 时钟该回落（下次 pushClock 由指纹变化触发 CLEAR）
+        lastClockFingerprint = null;
         ensureTickers();
         markDirty("songGone");
     }
@@ -839,83 +838,75 @@ public class StateRenderer {
     }
 
     /**
-     * 当前应该发给车机的计时器指令。
+     * 当前应该显示的计时器指令（预览用）。
      *
-     * ★ 这不是「算好的读数」：SYNC 的计时器是 App 下指令、车机自己走表。
-     *   预览器拿这条指令自己模拟走表，因此它与
-     *   「Show 节流（1 秒）」「歌词选句（时间轴）」是三条独立的时间线。
-     *
-     * 优先级与实车一致：用户计时器 &gt; 导航 ETA &gt; 播放进度。
+     * <p>★ <b>与实车同源</b>：和 {@code songClockRpcList()} 一样都走
+     * {@link ClockPlanner#plan}，这里只取 {@code preview} 字段。
+     * 以前预览和实车各算一套，已经出现过「预览 59:59、实车 00:00」这类分叉，
+     * 加一个来源就要改两处 —— 现在只有一个决策点。</p>
      */
     private ClockInstruction currentClockInstruction() {
-        long now = System.currentTimeMillis();
-
-        // ① 用户计时器（走秒或暂停都占着那一格）
-        if (timerActive) {
-            if (timerRunning) {
-                ClockInstruction.Mode mode = timerCountdown
-                        ? ClockInstruction.Mode.COUNTDOWN : ClockInstruction.Mode.COUNTUP;
-                // 起始值固定，靠 anchor（真实开始时刻）推着走
-                return reuseClock(mode, timerH, timerM, timerS, timerStartMillis);
-            }
-            // 暂停：定格在暂停那一刻的读数
-            long sec = timerElapsedSeconds();
-            int h = (int) (sec / 3600);
-            int m = (int) ((sec / 60) % 60);
-            int s = (int) (sec % 60);
-            return reuseClock(ClockInstruction.Mode.PAUSE, h, m, s, now);
-        }
-
-        // ② 导航 ETA：借 mm:ss 位显示到达时刻（hh 塞进分钟位）
-        String eta = navClockText;
-        if (eta != null && eta.indexOf(':') > 0) {
-            try {
-                int c = eta.indexOf(':');
-                int hh = Integer.parseInt(eta.substring(0, c));
-                int mm = Integer.parseInt(eta.substring(c + 1));
-                return reuseClock(ClockInstruction.Mode.PAUSE, 0, hh, mm, now);
-            } catch (Exception ignored) { }
-        }
-
-        /*
-         * ③ 歌曲时间：在播就从当前播放位置起表；**暂停就定格**。
-         *
-         *   ★ 暂停必须显式走 PAUSE，不能靠下面 ④「沿用还在走的指令」——
-         *     否则暂停后预览里的秒数会一直往上爬（实测的 bug）。
-         *     车机真实行为也是定格：App 不发新指令，那一格就停在最后读数。
-         *
-         *   ★ 同时把条件放宽成「只要有歌数据」：位置为 0 也算（显示 00:00），
-         *     否则刚起播那一瞬间会掉进 ④，显示出上一条不相干的指令。
-         */
-        if (song != null && song.hasData()) {
-            long pos = Math.max(0, song.positionMs);
-            int m = (int) ((pos / 60_000) % 60);
-            int s = (int) ((pos / 1000) % 60);
-            if (song.playing) {
-                return reuseClock(ClockInstruction.Mode.COUNTUP, 0, m, s, now);
-            }
-            // 暂停 / 停止：定格在最后已知位置
-            return reuseClock(ClockInstruction.Mode.PAUSE, 0, m, s, now);
-        }
-
-        /*
-         * ④ 连歌都没有 → 不留任何旧指令。
-         *
-         *   ★ 这里以前会 `return last`（沿用还在走的那条），后果是：
-         *     「清零后又没有歌」→ 预览里仍挂着一个一直在爬的数字；
-         *     用户计时器清零后不回落到音乐时间，也是它带偏的。
-         *     用户计时器的暂停态已经在 ① 里处理，这里没有需要沿用的东西了。
-         */
-        return ClockInstruction.none();
+        ClockPlanner.Plan plan = ClockPlanner.plan(plannerInput(System.currentTimeMillis()));
+        ClockInstruction p = plan.preview;
+        return reuseClock(p.mode, p.h, p.m, p.s, p.issuedAtMs);
     }
+
+    /**
+     * 把当前状态打成一份快照交给 {@link ClockPlanner} —— <b>唯一入口</b>。
+     *
+     * <p>★ ETA 直接从 {@code nav} 取，<b>不</b>依赖 {@code buildFrame()} 写好的
+     * {@code navClockText}。原因：{@code pushClock()} 经常在 {@code buildFrame()}
+     * 之前被同步调用（{@code SyncPlayCore.setNavigation()} 是先设数据再推时钟），
+     * 那时 {@code navClockText} 还是上一帧的值，会白等一个推送周期才把 ETA 打上去。</p>
+     */
+    private ClockPlanner.Input plannerInput(long nowMs) {
+        ClockPlanner.Input in = new ClockPlanner.Input();
+        in.timerActive = timerActive;
+        in.timerRunning = timerRunning;
+        in.timerCountdown = timerCountdown;
+        in.timerH = timerH;
+        in.timerM = timerM;
+        in.timerS = timerS;
+        in.timerStartMs = timerStartMillis;
+        in.timerPausedMs = timerPausedAt;
+
+        Navigation n = nav;
+        in.etaText = (n != null && n.hasData()) ? n.etaClockNow() : null;
+
+        in.songPresent = song != null && song.hasData();
+        if (in.songPresent) {
+            in.songPlaying = song.playing;
+            in.songPosMs = song.positionMs;
+            in.songDurationMs = song.durationMs;
+            in.songTitle = nz(song.title);
+            in.songArtist = nz(song.artist);
+        }
+        in.songEndTimeEnabled = songEndTimeEnabled;
+        in.nowMs = nowMs;
+        return in;
+    }
+
+    /**
+     * 歌曲正计时是否带 {@code endTime = 歌曲总时长}。
+     *
+     * <p>默认关，等实车确认车机接受后再打开（第 3 批会打开）。
+     * 带 endTime 的版本被拒时由 {@code ClockDispatcher} 降级重发，见其注释。</p>
+     */
+    private volatile boolean songEndTimeEnabled = false;
 
     /**
      * 同一条指令就沿用原来的 issuedAtMs —— 否则每次重建帧都会把走表起点重置到 0，
      * 预览里的秒数就不动了。
+     *
+     * <p>★ {@code anchor} 也要参与比较：计时器「暂停 → 继续」时
+     * {@code timerStartMillis} 会整体平移（把暂停时长补回去），
+     * 此时 mode/h/m/s 都没变，但走表起点变了。只看前四个字段就会沿用旧对象，
+     * 预览会把暂停那段时长也算进去，读数凭空多出一截。</p>
      */
     private ClockInstruction reuseClock(ClockInstruction.Mode mode, int h, int m, int s, long anchor) {
         ClockInstruction last = lastClock;
-        if (last != null && last.mode == mode && last.h == h && last.m == m && last.s == s) {
+        if (last != null && last.mode == mode && last.h == h && last.m == m
+                && last.s == s && last.issuedAtMs == anchor) {
             return last;
         }
         ClockInstruction c = ClockInstruction.of(mode, h, m, s, anchor);
@@ -1023,12 +1014,34 @@ public class StateRenderer {
                 timerActive = true;
                 break;
             case "PAUSE":
+                /*
+                 * ★ 没有计时器时的 PAUSE 直接忽略。
+                 *
+                 *   否则 timerActive 会被置 true、读数恒为 0，两步法定格把车机
+                 *   定在 00:00 —— 用户只是想按一下「暂停」，结果凭空多出一块表。
+                 */
+                if (!timerActive) {
+                    Log2.i(TAG, "忽略 PAUSE：当前没有计时器");
+                    return;
+                }
                 // 暂停只是"停止走秒"，方向和起始值一律不动
                 timerPausedAt = System.currentTimeMillis();
                 timerRunning = false;
                 timerActive = true;          // ★ 暂停 = 仍然占屏，只是不走秒
                 break;
             case "RESUME":
+                /*
+                 * ★ 没有可恢复的计时器时忽略。
+                 *
+                 *   以前这里照样把 timerRunning 置 true，而 timerStartMillis 还是 0 ——
+                 *   预览按「now - 0」推出来的读数是 59:59（clamp 后），
+                 *   而实车侧因为压根没有表在跑，RESUME 会被 REJECTED。
+                 *   同一次操作，两边给出完全相反的结果。
+                 */
+                if (!timerActive || timerStartMillis == 0) {
+                    Log2.i(TAG, "忽略 RESUME：没有可恢复的计时器");
+                    return;
+                }
                 if (timerPausedAt > 0) {
                     // 把暂停期间的时间补回去
                     timerStartMillis += System.currentTimeMillis() - timerPausedAt;
@@ -1046,25 +1059,17 @@ public class StateRenderer {
         }
 
         /*
-         * ★ 必须 markDirty，否则预览不跟着变。
+         * ★ 用户主动改了计时状态 → 指纹作废，必须重新决策一次。
          *
-         *   上一版漏了这一行：setTimerRunning() 里有、这里没有。
-         *   于是点「正计时/倒计时/暂停/清零」时，只有 RPC 发了出去（车机正常），
-         *   而 lastFrame 不重建 —— LogActivity 里的屏幕预览拿到的还是旧帧，
-         *   计时器那一格完全不动（有歌在播时才碰巧对，因为播放位置心跳会顺带刷新）。
+         *   以前这里有 5 个互相打架的标记（timerClockKey / songClockStarted /
+         *   lastSongKey / lastClockTextSent / lastEtaSent），加一个来源就要想清楚
+         *   该清哪几个。现在只有一个指纹。
          *
-         * ★ 同时清掉投递指纹：用户主动改了计时状态，必须重新投一次。
-         *   否则「暂停 → 继续 → 在同一秒内又暂停」会被节流判成"读数没变"而漏发。
-         *
-         * ★ 清零时还要放开歌曲计时的闸门，让时钟格能重新走播放时间 ——
-         *   否则 songClockStarted 仍为 true 且歌没换，songClockRpcList() 会判定
-         *   "不用重发"，车机就停在上一条计时器读数上（实测问题）。
+         *   注意：调用方（{@code SyncPlayCore.doTimer}）发完显式指令后会用
+         *   {@link #markClockFingerprintSynced()} 把它同步成「已发」，避免紧接着的
+         *   {@code pushClock()} 把同一条指令再发一遍。
          */
-        timerClockKey = null;
-        if ("CLEAR".equals(mode)) {
-            songClockStarted = false;
-            lastSongKey = null;
-        }
+        lastClockFingerprint = null;
         markDirty("timerState");
     }
 
@@ -1074,18 +1079,14 @@ public class StateRenderer {
     public int getTimerStartSeconds() { return timerS; }
     public boolean isTimerCountdown() { return timerCountdown; }
 
-    /** 计算当前应显示的计时器秒数（正计时=已过秒数，倒计时=剩余秒数） */
+    /**
+     * 计算当前应显示的计时器秒数（正计时=已过秒数，倒计时=剩余秒数）。
+     *
+     * <p>委托给 {@link ClockPlanner#timerValueSeconds} —— 读数只允许有一个实现，
+     * 否则预览、日志、车机指令三处各算一遍，迟早对不上。</p>
+     */
     public long timerElapsedSeconds() {
-        if (timerStartMillis == 0) return 0;
-        long ref = (timerPausedAt > 0) ? timerPausedAt : System.currentTimeMillis();
-        long elapsed = (ref - timerStartMillis) / 1000;
-        if (elapsed < 0) elapsed = 0;
-
-        if (timerCountdown) {
-            long total = timerH * 3600L + timerM * 60L + timerS;
-            return Math.max(0, total - elapsed);
-        }
-        return elapsed;
+        return ClockPlanner.timerValueSeconds(plannerInput(System.currentTimeMillis()));
     }
 
     /**
@@ -1099,137 +1100,40 @@ public class StateRenderer {
     }
 
     /**
-     * {@link #timerClockList()} 的返回值。
+     * 倒计时是否已经走完（读数为 0）但还占着屏幕。
      *
-     * <p>为什么不用「null / 空列表 / 非空列表」三种含义塞进一个 List：
-     * 那样分不清「计时器接管但被节流（本轮不发，但也<b>不能</b>往下走 ETA）」
-     * 和「没有计时器（可以走 ETA）」。上一版就是这么混的 ——
-     * 计时器因节流返回空列表，调用方当成"已清除"，直接掉进 ETA 分支把时间覆盖了。</p>
+     * <p>用户 2026-11-27 的决定：<b>到期不自动清除</b> —— 屏幕上保留 {@code 00:00}，
+     * 只有手动点车机底栏的「计时」键才发 CLEAR。所以这里只给判据，
+     * 语义由 {@code CommandRouter.handleTimerKey} 决定。</p>
      */
-    private static final class TimerClockResult {
-        /** 计时器是否接管时钟格（不管本轮发不发） */
-        final boolean occupying;
-        /** 本轮要发的指令；occupying 为 true 时可能为空（节流） */
-        final java.util.List<SetMediaClockTimer> rpcs;
-
-        TimerClockResult(boolean occupying, java.util.List<SetMediaClockTimer> rpcs) {
-            this.occupying = occupying;
-            this.rpcs = rpcs;
-        }
-
-        static final TimerClockResult NOT_OCCUPYING =
-                new TimerClockResult(false, java.util.Collections.emptyList());
+    public boolean isTimerExpired() {
+        return timerActive && timerCountdown && timerElapsedSeconds() <= 0;
     }
 
     /**
-     * 按<b>本地记录的状态</b>重算「现在该让车机显示什么」—— 供跨失焦/重连后补发。
+     * 车机那边「时钟格已经是当前状态」的指纹（来自 {@link ClockPlanner.Plan#fingerprint}）。
      *
-     * <h3>为什么需要这个方法</h3>
-     * 掉出 HMI_FULL 时车机会把计时器扔掉（它的定时器跟着 HMI 生命周期）。
-     * 而我们本地一直记着状态：起始值 {@code timerH/M/S}、方向 {@code timerCountdown}、
-     * 起点 {@code timerStartMillis}、暂停时刻 {@code timerPausedAt}。
-     * 回到 FULL 后按这些重算一遍再投射，就能做到「跨焦点存活」。
-     *
-     * <h3>倒计时到期</h3>
-     * 需求：倒计时在失焦期间走完 → 回来就不用管了，按「已清除」处理，
-     * 时钟格切回 ETA / 播放时间（见用户 2026-11-21 的决定）。
+     * <p>{@code null} = 还没发过、刚清零、或刚回到 FULL —— 都必须重新决策一次。
+     * 这一个字段替代了以前的 {@code timerClockKey / songClockStarted / lastSongKey /
+     * lastClockTextSent / lastEtaSent} 五个互相打架的标记。</p>
      */
-    private TimerClockResult timerClockList() {
-        if (!timerActive) {
-            timerClockKey = null;
-            return TimerClockResult.NOT_OCCUPYING;
-        }
+    private volatile String lastClockFingerprint = null;
 
-        long v = timerElapsedSeconds();
-
-        // 倒计时走完了：清掉本地状态，让时钟格回落
-        if (timerCountdown && v <= 0) {
-            Log2.i(TAG, "倒计时已结束（失焦期间走完），自动清除");
-            clearTimerState();
-            return TimerClockResult.NOT_OCCUPYING;
-        }
-
-        /*
-         * 节流：同一个「读数 + 跑/停」状态只投递一次。
-         *
-         * 为什么按"读数"而不是按"起始值"：掉出 FULL 再回来时，读数已经往前走过了，
-         * 必须按新读数重投一次；而没离开过的时候读数不变，就不该重复发。
-         *
-         * 粒度是秒 —— 所以只有在真正需要重投（跨焦点、刚启动、刚暂停）时才会命中变化。
-         *
-         * ★ 命中节流时返回 occupying=true + 空 rpcs —— **调用方绝对不能再往下走 ETA**。
-         */
-        String key = v + "|" + (timerRunning ? "run" : "pause");
-        if (key.equals(timerClockKey)) {
-            return new TimerClockResult(true, java.util.Collections.emptyList());
-        }
-
-        int hh = (int) (v / 3600);
-        int mm = (int) ((v / 60) % 60);
-        int ss = (int) (v % 60);
-
-        java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(2);
-        if (timerRunning) {
-            // 在跑：COUNTUP 从当前读数起表，车机会接着走
-            out.add(SetMediaClockTimer.countUpFromStartTime(
-                    clockStart(hh, mm, ss), null, AudioStreamingIndicator.PLAY));
-            Log2.i(TAG, "投递计时器（走表）: " + hh + ":" + mm + ":" + ss);
-        } else {
-            /*
-             * 暂停：必须两步（先 COUNTUP 起表，再 PAUSE 停住）。
-             * 绝不能发一条「PAUSE + startTime」—— 车机会忽略时间参数。
-             */
-            SetMediaClockTimer[] pair = freezeClockRpc(hh, mm, ss);
-            out.add(pair[0]);
-            out.add(pair[1]);
-            Log2.i(TAG, "投递计时器（暂停定格）: " + hh + ":" + mm + ":" + ss);
-        }
-        timerClockKey = key;
-        return new TimerClockResult(true, out);
-    }
-
-    /** 上一次投递给车机的计时器状态指纹：{@code "读数|run/pause"} */
-    private volatile String timerClockKey = null;
-
-    /** 清掉用户计时器的全部本地状态 */
-    private void clearTimerState() {
-        timerActive = false;
-        timerRunning = false;
-        timerStartMillis = 0;
-        timerPausedAt = 0;
-        timerClockKey = null;
-        /*
-         * ★ 同时放开歌曲计时的闸门。
-         *
-         *   计时器退出后，时钟格要能重新走「播放时间」。但 songClockStarted 如果还是 true
-         *   且歌没换，songClockRpcList() 会判定"同一首歌已经在走表了，不用重发"，
-         *   结果车机停在上一条计时器读数上 —— 这就是「播放歌曲时计时、清零后
-         *   没切回播放时间」的原因。
-         */
-        songClockStarted = false;
-        lastSongKey = null;
-        markDirty("timerAutoClear");
+    /**
+     * 把指纹标记成「车机那边就是现在这个状态」。
+     *
+     * <p>用于 {@code SyncPlayCore.doTimer()} 发完<b>显式</b>指令之后：那条指令已经
+     * 按用户意图发出去了，紧接着的 {@code pushClock()} 不该再发一遍。
+     * 清零是例外 —— 清零后要让 {@code pushClock()} 立刻决定回落
+     * （ETA / 播放时间 / CLEAR），所以那边不调这个方法。</p>
+     */
+    public void markClockFingerprintSynced() {
+        lastClockFingerprint = ClockPlanner
+                .plan(plannerInput(System.currentTimeMillis())).fingerprint;
     }
 
     /**
-     * 歌曲播放计时器是否已由 SetMediaClockTimer 启动。
-     * 启动后不要再往 track 里塞时间，否则会和计时器打架。
-     */
-    private volatile boolean songClockStarted = false;
-    private String lastSongKey = null;
-
-    /**
-     * 用 SetMediaClockTimer 设置第 3 行右侧的时间。
-     *
-     * 优先级：
-     *   1. 用户计时器在跑 → 不动（让用户计时器占着）
-     *   2. 导航模式 → 显示 ETA 时刻
-     *   3. 歌曲模式 → COUNTUP 从播放位置起表
-     *
-     * @return 需要发送的 RPC；不需要返回 null
-     */
-    /**
-     * 用户计时器指令。
+     * 用户计时器指令（显式操作：开始 / 暂停 / 继续 / 清零）。
      *
      * <b>只构造，不发送</b>：发不发、发不出去怎么办，由调用方
      * （{@code SyncPlayCore}）决定。这样计时器的"本地状态"和"发 RPC"
@@ -1238,11 +1142,9 @@ public class StateRenderer {
      * ⚠ 调用前必须先 {@link #setTimerState}：PAUSE 的定格读数依赖它记下的
      *   {@code timerPausedAt}，顺序反了会算出"还在走"的值。
      *
-     * @return 要按顺序发出的指令列表（0~2 条）。暂停返回两条，见下面的注释。
+     * @return 要按顺序发出的指令（0~2 条）。暂停定格返回两条，见 {@link ClockRpc}
      */
     public java.util.List<SetMediaClockTimer> timerRpcList(int h, int m, int s, String mode) {
-        java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(2);
-
         UpdateMode um;
         try {
             um = UpdateMode.valueForString(mode);
@@ -1252,353 +1154,84 @@ public class StateRenderer {
 
         switch (um) {
             case PAUSE: {
-                /*
-                 * ★ 暂停定格必须两步（2026-11-21 实车 RPC Builder 验证）：
-                 *
-                 *   车机的 PAUSE 会**忽略 startTime**，只暂停当前正在跑的那块表。
-                 *   所以以前那条 `updatePauseWithNewStartTime(定格读数)` 其实是无效的 ——
-                 *   车机看不到时间参数，只是"暂停"了一下；如果当时压根没有表在跑，
-                 *   就直接 REJECTED，那一格保持旧值。
-                 *
-                 *   正确做法：
-                 *     ① COUNTUP(定格读数)  重新起一块表
-                 *     ② PAUSE              停住它
-                 *   两条必须按序发（sendSequentialRPCs）。
-                 */
                 long sec = timerElapsedSeconds();
                 int hh = (int) (sec / 3600);
                 int mm = (int) ((sec / 60) % 60);
                 int ss = (int) (sec % 60);
-                Log2.i(TAG, "计时器暂停，两步法定格在 " + hh + ":" + mm + ":" + ss);
-
-                SetMediaClockTimer[] pair = freezeClockRpc(hh, mm, ss);
-                out.add(pair[0]);
-                out.add(pair[1]);
-                return out;
+                Log2.i(TAG, "计时器暂停，两步法定格在 " + ClockPlanner.fmt(hh, mm, ss));
+                return asList(ClockRpc.freezeDuration(hh, mm, ss));
             }
             case RESUME:
-                out.add(SetMediaClockTimer.resumeWithPlayPauseIndicator(AudioStreamingIndicator.PLAY));
-                return out;
+                return asList(ClockRpc.resume());
             case CLEAR:
-                out.add(SetMediaClockTimer.clearWithPlayPauseIndicator(AudioStreamingIndicator.PAUSE));
-                return out;
+                return asList(ClockRpc.clear());
             case COUNTDOWN:
-                out.add(SetMediaClockTimer.countDownFromStartTime(
-                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY));
-                return out;
+                return asList(ClockRpc.countDown(h, m, s, null));
             case COUNTUP:
             default:
-                out.add(SetMediaClockTimer.countUpFromStartTime(
-                        clockStart(h, m, s), null, AudioStreamingIndicator.PLAY));
-                return out;
+                return asList(ClockRpc.countUp(h, m, s, null));
         }
     }
 
-    /**
-     * 车机时钟格只有 mm:ss，没有小时位：
-     *   - hours ≠ 0 会被判 REJECTED（实测 16:21 连拒两次）
-     *   - 超过 59:59 的读数夹到上限，宁可停格也不要被整条拒掉
-     */
-    private static StartTime clockStart(int h, int m, int s) {
-        long total = h * 3600L + m * 60L + s;
-        if (total < 0) total = 0;
-        if (total > 3599) total = 3599;
-        return new StartTime(0, (int) (total / 60), (int) (total % 60));
-    }
-
-    /**
-     * 算出「现在该往车机发的时钟指令」，可能有 <b>一到两条</b>。
-     *
-     * <h3>为什么要返回序列</h3>
-     * 2026-11-21 上车用 RPC Builder 验出来的真实语义（见 AGENTS.md §6.6.1）：
-     * <ul>
-     *   <li>{@code COUNTUP} / {@code COUNTDOWN} 的 {@code startTime} <b>生效</b></li>
-     *   <li>{@code PAUSE} / {@code RESUME} 的 {@code startTime} <b>被忽略</b> ——
-     *       它只是暂停/继续当前正在跑的那块表</li>
-     *   <li>没有 timer 在跑时发 {@code PAUSE} → {@code REJECTED}；
-     *       已经是暂停态时发 → {@code IGNORE}</li>
-     * </ul>
-     *
-     * 所以「把那一格定在某个读数」必须两步：
-     * <pre>
-     *   ① COUNTUP(startTime=目标值)   让车机起一块表
-     *   ② PAUSE                        停住它（不带 startTime，带了也白搭）
-     * </pre>
-     * 以前我们只发一条 {@code PAUSE + startTime}，车机压根不看时间参数 →
-     * 必然 {@code REJECTED}，那一格永远是空的。
-     *
-     * @return 要按顺序发出的 RPC 列表；空列表表示本轮不用发
-     */
-    public java.util.List<SetMediaClockTimer> songClockRpcList() {
-        java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(2);
-
-        if (sender == null) return out;
-
-        /*
-         * ① 用户计时器 —— **永远优先于 ETA 和播放时间**（用户 2026-11-21 确认）。
-         *
-         *   ★ 以前这里写的是 `if (timerRunning) return out;`，只挡住了"在跑"的计时器；
-         *     暂停态（timerActive=true, timerRunning=false）会穿透到下面的 ETA 分支，
-         *     于是导航一开始，暂停中的计时器就被到达时刻覆盖 —— 而 timerActive 仍是 true，
-         *     再点一下计时键又会因为"暂停中"被判定为要清零，时间整个消失。
-         *     这就是「导航覆盖计时器 + 再点消失」两个现象的共同根因。
-         *
-         *   现在按 timerActive 判断，并且在跑/暂停都要把当前读数重投一次
-         *   （掉出 FULL 期间车机已经把它丢了，不重投就对不上）。
-         */
-        TimerClockResult timer = timerClockList();
-        if (timer.occupying) {
-            lastTimerOccupying = true;
-            /*
-             * 计时器接管时钟格。
-             *
-             * ★ 这里必须**无条件 return**，哪怕 rpcs 为空（节流命中也算）。
-             *   上一版是 `if (timer.isEmpty()) 继续往下走`，把"节流未发"
-             *   和"计时器已清除"混为一谈 —— 于是计时器运行时只要有一次节流命中，
-             *   就掉进下面的 ETA 分支，到达时刻把计时器覆盖掉。
-             *
-             * ★ ETA 不需要另外缓存：navClockText 由 buildFrame() 每帧从
-             *   nav.etaClockNow() 独立算出，不受这里影响。计时器一退出，
-             *   下一次 pushClock() 自然能拿到最新的 ETA 上屏
-             *   （lastEtaSent 也不会在计时器期间被误更新，因为它只在真要发时才记）。
-             */
-            return timer.rpcs;
-        }
-
-        /*
-         * 只在「计时器从有到无」的那一刻打一次。
-         *
-         * ★ 2026-11-26：以前这行是无条件打的，而本方法（pushClock）在导航期间
-         *   每秒被调用一次（高德每秒推一次数据）→ 日志里「计时器已结束」每秒一条，
-         *   一次导航就刷上百条，把真正有用的信息淹了（长途实测 5.5 小时打了 305 条）。
-         *   功能上没有重复计算：下面的 ETA 分支有自己的节流（ETA 是 HH:mm，一分钟才变）。
-         */
-        if (lastTimerOccupying) {
-            lastTimerOccupying = false;
-            Log2.i(TAG, "计时器已结束，时钟格交回 ETA / 播放时间");
-        }
-
-        // 导航模式优先显示 ETA
-        if (navClockText != null && !navClockText.isEmpty()) {
-            // ★ 只有"确实要发出去"时才更新 lastClockTextSent。
-            //
-            //   以前的写法是先赋值、再检查，只要中间任一步 return（etaClockNow 取不到值、
-            //   ETA 恰好没变），这张"票"就被白白用掉了 —— 之后每次进来都在上一行
-            //   `navClockText.equals(last)` 处直接返回，ETA 永久卡死，直到导航结束。
-            //   实测就是这样：整个导航期间一条 SetMediaClockTimer 都没发出去。
-            if (navClockText.equals(lastClockTextSent)) return out;
-            if (nav == null) return out;
-
-            String clock = nav.etaClockNow();
-            if (clock == null) return out;           // 暂时拿不到到达时刻，下次再试，不消耗标记
-
-            if (!shouldResendEta(clock)) {
-                // ETA 时刻本身没变：记下当前值避免反复尝试，但等待它变化
-                lastClockTextSent = navClockText;
-                return out;
-            }
-
-            /*
-             * ★ 借 mm:ss 位显示到达时刻：StartTime(0, hh, mm)
-             *
-             *   车机只支持 CLOCK3 / CLOCKTEXT4，那一格是 mm:ss。
-             *   把 hh:mm 拆成 minutes=hh、seconds=mm，车机会原样渲染成 "16:21"。
-             *   （这一步能不能真显示出 hh:mm 还要上车看，但先把指令发对。）
-             */
-            int h = 0, m = 0;
-            try {
-                int c = clock.indexOf(':');
-                h = Integer.parseInt(clock.substring(0, c));
-                m = Integer.parseInt(clock.substring(c + 1));
-            } catch (Exception ignored) { }
-
-            String from = String.format(java.util.Locale.US, "%02d:%02d", h, m);
-            Log2.i(TAG, "计时器：显示到达时刻 " + clock
-                    + " → 两步法 freezeLiteral(" + from + ")");
-
-            /*
-             * ★ 必须用 freezeClockLiteral，不能用 freezeClockRpc。
-             *
-             *   freezeClockRpc 的 h/m/s 是「时长」，会走 clockStart() 累加成秒数
-             *   再夹到 3599 —— 18:11 会被算成 65460 秒 → 夹成 59:59。
-             *   实车日志就是这么出来的：
-             *     [Render] 两步法 freeze(18:11)
-             *     → {"startTime":{"hours":0,"minutes":59,"seconds":59}}   ← 错
-             *
-             *   freezeClockLiteral 把 hh 填进 minutes、mm 填进 seconds，
-             *   车机那一格是 mm:ss，渲染出来就是 "18:11"。
-             */
-            SetMediaClockTimer[] pair = freezeClockLiteral(h, m);
-            out.add(pair[0]);                        // ① COUNTUP 起表
-            out.add(pair[1]);                        // ② PAUSE 停住
-
-            lastClockTextSent = navClockText;        // ★ 真要发了才记
-            return out;
-        }
-
-        /*
-         * 歌曲模式：从播放位置起表（COUNTUP 本身就会真正生效，不需要再来一条 PAUSE）。
-         *
-         * ★ 导航结束时如果还在放歌，就走到这里 —— 时钟从 ETA 切回播放时间，
-         *   这是期望行为（用户明确要求「时钟切回播放时间」）。
-         */
-        lastClockTextSent = null;
-
-        // 暂停中 / 无歌：不是"起了新表"，落到下面的 CLEAN 分支判断
-        if (song != null && song.hasData() && song.playing) {
-            String key = song.title + "|" + song.artist;
-            boolean songChanged = !key.equals(lastSongKey);
-            if (songChanged || !songClockStarted) {
-                long pos = song.positionMs;
-                if (pos < 0) pos = 0;
-                int h = (int) (pos / 3_600_000);
-                int m = (int) ((pos / 60_000) % 60);
-                int s = (int) ((pos / 1000) % 60);
-
-                lastSongKey = key;
-                songClockStarted = true;
-                Log2.i(TAG, "启动播放计时 " + String.format(java.util.Locale.US,
-                        "%02d:%02d:%02d", h, m, s));
-
-                out.add(SetMediaClockTimer.countUpFromStartTime(
-                        new StartTime(h, m, s), null, AudioStreamingIndicator.PLAY));
-                return out;
-            }
-            // 同一首歌已经在走表了，不用重发
-            return out;
-        }
-
-        /*
-         * ★⑤ 该显示空，但我们之前往那一格发过东西 → 补一条 CLEAR 收掉。
-         *
-         *   这是「导航结束降级到空闲屏幕时时钟不消失」的根因：
-         *   以前走到函数末尾就 return 空列表，一条指令都不发，
-         *   而车机不会自己清空那一格 —— 它保留最后一次读数，直到收到 CLEAR。
-         *
-         *   触发条件（三者同时满足）：
-         *     · 没有用户计时器（timerRunning / 暂停中的 timerActive 都不算走到这里的理由，
-         *       见下面那句守卫）
-         *     · 没有导航 ETA（上面分支已 return）
-         *     · 没有在播的歌（上面分支已 return）
-         *   再叠加「之前发过东西」（lastClockTextSent / songClockStarted），
-         *   避免空闲状态下反复发 CLEAR。
-         */
-        if (timerActive) {
-            // 用户计时器还占着那一格（暂停态），不能清 —— 那是用户的东西
-            return out;
-        }
-        if (lastClockTextSent != null || songClockStarted) {
-            lastClockTextSent = null;
-            songClockStarted = false;
-            lastSongKey = null;
-            lastEtaSent = null;
-            Log2.i(TAG, "时钟该为空了（无导航/无播放）→ 发 CLEAR 收掉");
-            out.add(SetMediaClockTimer.clearWithPlayPauseIndicator(
-                    AudioStreamingIndicator.PAUSE));
-        }
+    /** 可变列表小工具（{@code sendSequential} 需要 List） */
+    private static java.util.List<SetMediaClockTimer> asList(SetMediaClockTimer... rpcs) {
+        java.util.List<SetMediaClockTimer> out = new java.util.ArrayList<>(rpcs.length);
+        java.util.Collections.addAll(out, rpcs);
         return out;
     }
 
     /**
-     * 「把时钟格定死在某个读数」的两条指令 —— <b>按「时长」理解</b>。
+     * 算出「现在该往车机发的时钟指令」。
      *
-     * <pre>
-     *   [0] COUNTUP(startTime)   车机开始走表
-     *   [1] PAUSE                停住（不带时间，带了也被忽略）
-     * </pre>
+     * <p>决策全部在 {@link ClockPlanner}。这里只做两件事：<b>指纹去重</b> +
+     * 一条「这一格现在归谁」的日志。</p>
      *
-     * 两条必须按顺序发（用 {@code sendSequentialRPCs}），中间不能插别的
-     * 时钟指令，否则第二条 PAUSE 停的会是别的表。
+     * <p>以前这里是 250 行手写分支，每加一个来源就要想清楚该清哪几个标记，
+     * 直接导致过「ETA 覆盖计时器」「清零后不回播放时间」两个实车 bug
+     * （2026-11-22 修）。现在只有一个决策点和一个指纹。</p>
      *
-     * ⚠ 这里的 h/m/s 是**时长**（如"计时器走了 0:02:35"），会经过
-     *   {@link #clockStart} 换算并夹到 59:59。**显示时刻（如 18:11）不能用这个方法**，
-     *   否则 18*3600+11*60 会被夹成 3599 → 显示 59:59（踩过）。
-     *   显示时刻请用 {@link #freezeClockLiteral}。
-     *
-     * @return 长度固定为 2 的数组
+     * @return 要按顺序发出的 RPC；空列表 = 车机那边已经是对的，不用发
      */
-    public SetMediaClockTimer[] freezeClockRpc(int h, int m, int s) {
-        SetMediaClockTimer up = SetMediaClockTimer.countUpFromStartTime(
-                clockStart(h, m, s), null, AudioStreamingIndicator.PLAY);
-        SetMediaClockTimer pause = SetMediaClockTimer.pauseWithPlayPauseIndicator(
-                AudioStreamingIndicator.PAUSE);
-        return new SetMediaClockTimer[]{up, pause};
+    public java.util.List<SetMediaClockTimer> songClockRpcList() {
+        if (sender == null) return java.util.Collections.emptyList();
+
+        ClockPlanner.Plan plan = ClockPlanner.plan(plannerInput(System.currentTimeMillis()));
+
+        /*
+         * 日志降噪：只在「计时器从有到无 / 从无到有」的那一刻打一条。
+         *
+         * 本方法（pushClock）导航期间每秒被调一次（高德每秒推数据），
+         * 无条件打会刷屏 —— 长途实测 5.5 小时打了 305 条。
+         */
+        if (plan.occupying() != lastTimerOccupying) {
+            lastTimerOccupying = plan.occupying();
+            if (lastTimerOccupying) {
+                Log2.i(TAG, "计时器接管时钟格");
+            } else {
+                Log2.i(TAG, "计时器已结束，时钟格交回 ETA / 播放时间");
+            }
+        }
+
+        if (plan.fingerprint.equals(lastClockFingerprint)) return java.util.Collections.emptyList();
+        lastClockFingerprint = plan.fingerprint;
+        Log2.i(TAG, "时钟 → " + plan.reason);
+        return plan.rpcs;
     }
 
-    /**
-     * 两步法的「字面值」变体：{@code mm:ss} 原样填进去，不做时长换算。
-     *
-     * <p>用于把**到达时刻**（如 18:11）打到时钟格上：车机那一格是 mm:ss，
-     * 填 `(minutes=18, seconds=11)` 就渲染成 `18:11`。</p>
-     *
-     * <p>⚠ 不能走 {@link #clockStart}：它把参数当时长累加并夹到 3599 秒，
-     * `18:11` 会被算成 65460 秒 → 夹成 `59:59`。实车日志里的
-     * `{"minutes":59,"seconds":59}` 就是这么来的。</p>
-     *
-     * @param hh 要显示在"分钟"位置的数（0~59）
-     * @param mm 要显示在"秒"位置的数（0~59）
-     */
-    public SetMediaClockTimer[] freezeClockLiteral(int hh, int mm) {
-        int a = Math.max(0, Math.min(59, hh));
-        int b = Math.max(0, Math.min(59, mm));
-        SetMediaClockTimer up = SetMediaClockTimer.countUpFromStartTime(
-                new StartTime(0, a, b), null, AudioStreamingIndicator.PLAY);
-        SetMediaClockTimer pause = SetMediaClockTimer.pauseWithPlayPauseIndicator(
-                AudioStreamingIndicator.PAUSE);
-        return new SetMediaClockTimer[]{up, pause};
-    }
-
-    /** 上次真正发给车机的 ETA 时刻（hh:mm） */
-    private String lastEtaSent = null;
-
-    /*
-     * 曾经这里有一套 etaClockRejected 兜底逻辑：车机拒了 ETA 就回落到
-     * mediaTrack 显示「13:58到」。那建立在错误的归因上 ——
-     * 以为"分钟位有上限"，实际是「单步 PAUSE + startTime」这个写法本身无效
-     * （见 §6.6.1）。现在改成了正确的两步法，兜底就不需要了。
-     *
-     * 留着这段注释是为了防止有人再"修"回去。
-     */
-
-    /**
-     * 这个新的 ETA 值要不要重发。
-     *
-     * 规则简单：到达时刻变了就发，没变就不发。
-     *
-     * 高德的 ETA 是按分钟算的，同一分钟内反复推送也是同一个值，
-     * 所以不需要额外的门槛 —— 剩下的就是"变了一次就更新一次"。
-     */
-    private boolean shouldResendEta(String clock) {
-        if (clock == null) return false;
-        if (clock.equals(lastEtaSent)) return false;
-        Log2.i(TAG, "ETA 变化：" + lastEtaSent + " → " + clock);
-        lastEtaSent = clock;
-        return true;
-    }
-
-    /** 第3行右侧应该显示的 ETA 时刻（null 表示交给其它逻辑） */
+    /** 第3行右侧应该显示的 ETA 时刻（null = 没有导航）。预览 / 诊断用 */
     private volatile String navClockText = null;
 
     /** 预览用：取第3行右侧应显示的时间 */
     public String getNavClockText() { return navClockText; }
 
-    /** 上次发给车机的时钟文本，避免重复发送 */
-    private volatile String lastClockTextSent = null;
-
     /**
-     * 清掉时钟相关的节流缓存，让下一次 {@link #songClockRpcList()} 无条件重算重发。
+     * 清掉时钟指纹，让下一次 {@link #songClockRpcList()} 无条件重算重发。
      *
      * <p>用在「回到 HMI_FULL / 重新连上」：那一刻车机那边的时钟格<b>已经被清空</b>了，
-     * 但我们这边的 ETA 没变、歌没换，普通节流会判定"不用发" ——
-     * 结果车机上那一格永远空着。</p>
+     * 但我们这边的 ETA 没变、歌没换，指纹会判定"不用发" —— 结果那一格永远空着。</p>
      */
     public void invalidateClockCache() {
-        lastClockTextSent = null;
-        lastEtaSent = null;
-        lastSongKey = null;
-        songClockStarted = false;
-        // 计时器也要重投：车机那边的定时器已经随 HMI 掉级被丢弃了
-        timerClockKey = null;
+        lastClockFingerprint = null;
     }
 
     /** "歌名 - 歌手" 格式，给 mediaTrack 用 */
@@ -1614,11 +1247,6 @@ public class StateRenderer {
     }
 
     private static boolean notEmpty(String s) { return s != null && !s.trim().isEmpty(); }
-
-    /** 用户计时器变化时调用，用来抢占 / 归还 track 行 */
-    public void resetSongClock() {
-        songClockStarted = false;
-    }
 
     /**
      * track 行显示的文字。

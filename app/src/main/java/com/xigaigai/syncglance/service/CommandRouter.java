@@ -136,17 +136,21 @@ public final class CommandRouter {
     }
 
     /**
-     * 第 3 格「计时」键：一次按键走一步，三态循环。
+     * 第 3 格「计时」键：一次按键走一步。
      *
      * <pre>
-     *   未激活  --点-->  正计时开始
-     *   走秒中  --点-->  暂停（定格）
-     *   暂停中  --点-->  清零
-     *   清零后  --点-->  又开始正计时   ← 回到第一态，循环成立
+     *   未激活            --点-->  正计时开始
+     *   倒计时已到 00:00   --点-->  清零          ← 到期后只有手动点才清
+     *   走秒中            --点-->  暂停（定格）
+     *   暂停中            --点-->  清零
+     *   清零后            --点-->  又开始正计时   ← 回到第一态，循环成立
      * </pre>
      *
      * 注意它同时管着倒计时：如果你先在 App 里开了 5 分钟倒计时，
      * 按这个键一样是"先暂停、再清零"，语义一致。
+     *
+     * <p>★ 倒计时到期后<b>不会</b>自动清除（用户 2026-11-27 的决定）：
+     * 屏幕上保留 {@code 00:00}、底栏「计时」键保持高亮，直到用户按下这个键。</p>
      */
     private static void handleTimerKey(SdlService svc) {
         com.xigaigai.syncglance.display.StateRenderer r = svc.getRenderer();
@@ -155,6 +159,16 @@ public final class CommandRouter {
         if (!r.isTimerActive()) {
             Log2.i(TAG, "计时键：开始正计时");
             svc.doTimer(0, 0, 0, "COUNTUP");
+        } else if (r.isTimerExpired()) {
+            /*
+             * ★ 必须先判到期，再判「在跑」。
+             *
+             *   倒计时走到 0 之后 timerRunning 仍然是 true（我们没把它停掉），
+             *   顺序反了就掉进下面的 PAUSE 分支 —— 用户按「清零」，
+             *   车机收到的却是暂停，那一格还是 00:00。
+             */
+            Log2.i(TAG, "计时键：倒计时已到 00:00 → 清零");
+            svc.doTimer(0, 0, 0, "CLEAR");
         } else if (r.isTimerRunning()) {
             Log2.i(TAG, "计时键：暂停");
             svc.doTimer(0, 0, 0, "PAUSE");

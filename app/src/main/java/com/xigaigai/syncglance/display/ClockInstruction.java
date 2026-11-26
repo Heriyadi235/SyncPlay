@@ -14,6 +14,15 @@ package com.xigaigai.syncglance.display;
  *
  * 时间基准用 {@link System#currentTimeMillis()}，与 StateRenderer 里的
  * timerStartMillis 保持同一套时钟。
+ *
+ * <h3>小时位（2026-11-27 实测修正）</h3>
+ * 车机时钟格<b>并非只有 mm:ss</b>：{@code startTime.hours} 实测有效，
+ * 会渲染出 {@code 1:23:45} 这样的三段式。所以：
+ * <ul>
+ *   <li>计时器用真实的 {@code h:m:s}，超过 59:59 不再停格；</li>
+ *   <li>导航 ETA 仍<b>借</b> mm:ss 位显示（{@code hours=0, minutes=hh, seconds=mm}），
+ *       所以 h &gt; 0 时才画小时段 —— ETA 天然 h=0，格式不受影响。</li>
+ * </ul>
  */
 public final class ClockInstruction {
 
@@ -30,11 +39,16 @@ public final class ClockInstruction {
         CLEAR
     }
 
-    /** 车机时钟格是 mm:ss，没有小时位；超过 59:59 车机会停格 */
-    private static final long MAX_SECONDS = 3599;
+    /**
+     * 预览推算的上限（99:59:59）。
+     *
+     * <p>车机时钟格实测支持小时位，计时器不再受 {@code 59:59} 限制；
+     * 这里只是一个防溢出的护栏，远大于任何真实用法。</p>
+     */
+    private static final long MAX_SECONDS = 99 * 3600L + 59 * 60 + 59;
 
     public final Mode mode;
-    /** 起始时间的小时位。车机没有小时位，这里恒为 0（ETA 借位时也放 0） */
+    /** 小时位。ETA 借位场景下恒为 0 */
     public final int h;
     /** 分钟位。ETA 场景下这里借用来放「小时」 */
     public final int m;
@@ -65,12 +79,12 @@ public final class ClockInstruction {
         return new ClockInstruction(Mode.CLEAR, 0, 0, 0, System.currentTimeMillis());
     }
 
-    /** 正计时（mm:ss 语义） */
+    /** 正计时（h:m:s 语义） */
     public static ClockInstruction countUp(int h, int m, int s) {
         return new ClockInstruction(Mode.COUNTUP, h, m, s, System.currentTimeMillis());
     }
 
-    /** 倒计时（mm:ss 语义） */
+    /** 倒计时（h:m:s 语义） */
     public static ClockInstruction countDown(int h, int m, int s) {
         return new ClockInstruction(Mode.COUNTDOWN, h, m, s, System.currentTimeMillis());
     }
@@ -78,7 +92,7 @@ public final class ClockInstruction {
     /**
      * 定格显示某个时刻。
      * <p>ETA 用法：{@code pauseAt(0, 16, 21)} 在车机上会原样显示成 {@code 16:21}
-     * （因为那一格就是 mm:ss，16 被当成"分钟"渲染）。
+     * （借位：16 被当成"分钟"、21 被当成"秒"）。
      */
     public static ClockInstruction pauseAt(int h, int m, int s) {
         return new ClockInstruction(Mode.PAUSE, h, m, s, System.currentTimeMillis());
@@ -105,25 +119,25 @@ public final class ClockInstruction {
     }
 
     /**
-     * 车机上那一格此刻显示的文本，例如 {@code 03:21} / {@code 16:21}。
+     * 车机上那一格此刻显示的文本。
+     *
+     * <p>格式跟车机一致：<b>有小时才画小时段</b>。</p>
+     * <ul>
+     *   <li>{@code 03:21} —— 计时器不到 1 小时、以及所有 ETA（借位 h=0）</li>
+     *   <li>{@code 1:23:45} —— 计时器超过 1 小时</li>
+     * </ul>
      * 不该显示时返回空串。
      */
     public String displayText() {
         long v = valueSeconds();
         if (v < 0) return "";
-        long mm = v / 60;
+        long hh = v / 3600;
+        long mm = (v / 60) % 60;
         long ss = v % 60;
+        if (hh > 0) {
+            return String.format(java.util.Locale.US, "%d:%02d:%02d", hh, mm, ss);
+        }
         return String.format(java.util.Locale.US, "%02d:%02d", mm, ss);
-    }
-
-    /** 这条指令是否需要一个走表的刷新（PAUSE/NONE/CLEAR 不用） */
-    public boolean isRunning() {
-        return mode == Mode.COUNTUP || mode == Mode.COUNTDOWN;
-    }
-
-    /** 与另一条指令是否"同一个显示状态"（用来决定预览要不要重画） */
-    public boolean sameAs(ClockInstruction o) {
-        return o != null && o.mode == mode && o.h == h && o.m == m && o.s == s;
     }
 
     @Override
