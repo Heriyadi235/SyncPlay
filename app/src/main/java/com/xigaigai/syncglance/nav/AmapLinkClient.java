@@ -117,51 +117,26 @@ public class AmapLinkClient {
     public static void setPreviewVisible(boolean visible) {
         if (previewVisible == visible) return;
         previewVisible = visible;
-        Log2.i(TAG, "预览页" + (visible ? "已打开（非 FULL 时开始解析导航包）" : "已关闭（非 FULL 时停止解析）"));
-        resumeIfPausedForPower();
+        Log2.i(TAG, "预览页" + (visible ? "已打开（开始解析导航包）" : "已关闭（停止解析导航包）"));
+        // 注意：这里**不再触发重连** —— 连接由 AmapLinkClient 自己维持，
+        // 开不开预览只影响"要不要解密/解析"，见 class 注释。
     }
 
     public static boolean isPreviewVisible() { return previewVisible; }
 
     /**
-     * 因为"没人看"而暂停过重试，现在有人看了（车机连上 / 预览打开）→ 自动恢复。
+     * 是否应该**解密并解析**导航包（车机连着，或者用户正在看预览页）。
      *
-     * <p>以前 {@code retry()} 在 {@code !shouldDecode()} 时直接 {@code return}，
-     * 既不排下一次 bind、也不留任何标记 —— 等于静默停止，之后就算条件恢复，
-     * 也没人再启动它。现在用 {@link #pausedForPower} 记下来，条件一变就唤醒。</p>
+     * <p>★ 这个条件<b>只管解码</b>，不再管连接 —— 两者已经解耦
+     * （用户 2026-11-27 决定，方案 B）。以前它同时决定"要不要重连"，
+     * 导致没连车机时 AmapLink 47 毫秒就放弃、界面卡在重连中。</p>
      */
-    private static void resumeIfPausedForPower() {
-        if (!shouldDecode()) return;
-        AmapLinkClient inst = instance;
-        if (inst == null) return;
-        boolean wasPaused;
-        synchronized (inst) {
-            wasPaused = inst.pausedForPower;
-            if (!wasPaused) return;
-            inst.pausedForPower = false;
-        }
-        Log2.i(TAG, "有人看导航了（车机连上 / 预览打开），恢复重试");
-        inst.wakeUp();
-    }
-
-    /**
-     * 因省电暂停了重试（既没连车机、也没开预览）。
-     *
-     * <p>不是"放弃"，是"挂起"——{@link #resumeIfPausedForPower()} 会在条件恢复时
-     * 重新开始，用户点「高德地图」按钮或调用 {@link #wakeUp()} 也会清掉它。</p>
-     */
-    private volatile boolean pausedForPower = false;
-
-    /** 是否应该解码（车机连着，或者用户正在看预览页） */
     private static boolean shouldDecode() {
         return headUnitConnected || previewVisible;
     }
 
     public static void setHeadUnitConnected(boolean connected) {
-        boolean changed = headUnitConnected != connected;
         headUnitConnected = connected;
-        // 车机连上 = 有人看导航了 → 若之前因省电挂起，自动恢复
-        if (changed && connected) resumeIfPausedForPower();
     }
 
     public static boolean isHeadUnitConnected() { return headUnitConnected; }
@@ -333,10 +308,19 @@ public class AmapLinkClient {
         if (attempts >= MAX_ATTEMPTS) {
             return "高德地图未启动";
         }
-        if (attempts > 0) {
-            return "尝试重连中 (" + attempts + "/" + MAX_ATTEMPTS + ")";
-        }
-        return "未连接";
+        /*
+         * ★ 不再有 `if (attempts > 0) return "尝试重连中"` 这条分支。
+         *
+         *   它曾导致「打开 App 没启动高德时，界面永远卡在 尝试重连中 (1/8)」：
+         *   走到这里说明 current == null（没有正在进行的尝试），
+         *   却因为残留的 attempts > 0 而谎报"正在重连"。
+         *
+         *   真实情况只有两种：
+         *     · 刚启动、还没试过（attempts == 0）
+         *     · 试了但还没有进行中的尝试（即将按退避重试，或已放弃）
+         *   两者都该显示「未连接」，“重连中”只属于 current != null。
+         */
+        return attempts > 0 ? "未连接（即将重试）" : "未连接";
     }
 
     /**
@@ -433,9 +417,9 @@ public class AmapLinkClient {
      * 外部唤醒：重新开始一轮重试。
      *
      * 触发时机：
-     *   - 用户点了「回家 / 去公司」
-     *   - 车机连上 / 信息页打开（见 resumeIfPausedForPower）
+     *   - 用户点了「高德地图」/「重新连接」按钮
      *   - 收到高德的通知（说明它启动了）
+     *   - 主界面 onResume 补一次
      */
     public void wakeUp() {
         wakeUp(false);
@@ -492,7 +476,6 @@ public class AmapLinkClient {
                 current = null;
             }
             attempts = 0;                       // 重置重试计数
-            pausedForPower = false;
         }
         if (old != null) old.retire();
         Log2.i(TAG, "收到唤醒，重新尝试连接高德");
@@ -539,29 +522,22 @@ public class AmapLinkClient {
         if (closed || current != a) return;
 
         /*
-         * ★ 没人要看导航时，不要继续空转。
+         * ★ 连接策略与界面显示解耦（用户 2026-11-27 决定，方案 B）。
          *
-         *   shouldDecode() = 已连车机 || 信息页可见。
-         *   两者都不成立时（比如平时放在兜里、也没连车机），继续 bindService
-         *   纯属浪费电。等用户打开信息页 / 车机连上，会自动恢复（见 resumeIfPausedForPower）。
+         *   以前这里有一条 `if (!shouldDecode()) { 挂起; return; }` ——
+         *   shouldDecode() 是「车机连着 || 预览可见」，本来是给**解密**用的
+         *   （AES-GCM 是 CPU 大头，没人看就是白解密）。
          *
-         * ★ 注意这里是**挂起**不是**放弃**：标记 pausedForPower，
-         *   条件一变就回来。以前只是 return，什么标记都不留 → 静默死掉。
-         */
-        if (!shouldDecode()) {
-            a.retire();
-            current = null;
-            pausedForPower = true;
-            Log2.i(TAG, "省电挂起：没连车机也没开预览，等外部唤醒");
-            return;
-        }
-
-        /*
-         * 重试过程不打日志。
+         *   但把**重连**也挂在这个条件上，后果是：
+         *     没连车机 + 没开预览 → 绑定 47 毫秒后就放弃
+         *     → 界面卡在「尝试重连中 (1/8)」不动
+         *     → 高德启动也连不上，用户必须先开一次预览才能用
          *
-         * 高德没启动时会连试 8 次（退避合计约 72 秒），每次一条就是刷屏；
-         * 用户只需要知道「连上了」或者「试满次数还是连不上」。
-         * 后者在 bind() 开头那次 beginAttempt() 失败时已经有一条汇总日志。
+         *   现在两者彻底分开：
+         *     · 连接（bind / 注册 / 收回调）—— 维持，不受没人看影响
+         *     · 解密 + 解析导航包 —— 仍然受 shouldDecode() 约束（在 handleXxx 里判断）
+         *
+         *   保持连接的代价很小：不解密时，一条回调只是把字符串读出来再丢掉。
          */
         a.retire();
         current = null;
@@ -800,11 +776,12 @@ public class AmapLinkClient {
     private void handleSmallPayload(String raw) {
         callbackCount++;
 
-        // 车机没连：不解密，只记心跳
+        // 没人看导航（车机没连、预览也没开）：不解密，只记心跳。
+        // ★ 注意这**不影响连接** —— 连接由 retry()/bind() 独立维持。
         if (!shouldDecode()) {
             if (shouldLogHeartbeat()) {
                 Log2.i(TAG, "收到回调 #" + callbackCount
-                        + "（小包 " + raw.length() + " 字符，未连车机跳过解码）");
+                        + "（小包 " + raw.length() + " 字符，没人看跳过解码）");
             }
             return;
         }
