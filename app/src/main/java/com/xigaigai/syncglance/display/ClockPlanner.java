@@ -159,7 +159,14 @@ public final class ClockPlanner {
 
             if (in.songPlaying) {
                 StartTime end = null;
-                if (in.songEndTimeEnabled && in.songDurationMs > 1000) {
+                /*
+                 * endTime = 歌曲总时长。只在「总长有效、且明显大于当前位置」时才带：
+                 * 很多播放器不给 DURATION（=0），而「进度已经贴近结尾」时带上
+                 * endTime 可能小于 startTime，车机有理由直接拒 —— 一旦被拒，
+                 * SdlService 会关掉整个特性，那就连播放时间都不显示了。
+                 */
+                if (in.songEndTimeEnabled && in.songDurationMs > 1000
+                        && in.songDurationMs - 1000 > pos) {
                     end = ClockRpc.fromMillis(in.songDurationMs);
                 }
                 String fp = "song|play|" + in.songTitle + "|" + in.songArtist

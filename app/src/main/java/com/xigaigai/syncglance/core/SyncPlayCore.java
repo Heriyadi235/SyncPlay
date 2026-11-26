@@ -100,6 +100,15 @@ public final class SyncPlayCore {
             lyricManager = new LyricManager(new File(app.getCacheDir(), "lyrics"));
 
             renderer.setLifecycle(lifecycle);
+            /*
+             * 播放时间的正计时带 endTime = 歌曲总时长。
+             *
+             * 这样车机知道"这块表走到哪算完"，不再是一块没有终点的表。
+             * ⚠ 车机若不接受 endTime 会整条 REJECTED（连播放时间都不显示），
+             *   所以 SdlService 收到拒绝时会调 {@link #disableSongEndTime()}
+             *   自动降级重推 —— 不要假设它一定被接受。
+             */
+            renderer.setSongEndTimeEnabled(true);
             // 渲染器的所有出站 RPC 都先到这里，再转发给当前挂着的发送者
             renderer.setSender(new StateRenderer.Sender() {
                 @Override

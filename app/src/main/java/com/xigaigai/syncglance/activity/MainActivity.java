@@ -363,62 +363,74 @@ public class MainActivity extends AppCompatActivity {
          *   （官方语义），平时根本不存在 —— 以前走 getInstance() 就会
          *   直接 return "服务未启动"，连预览都不动。
          *
-         *   RPC 发不发由 SyncPlayCore 判断：没连接就先记着，连上后自动补发。
+         *   RPC 发不发由 SyncPlayCore 判断：没连接时只更新本地状态，
+         *   回到 FULL 时由 pushClockForce() 按当前状态重投。
          */
         SyncPlayCore.get().doTimer(h, m, s, mode);
     }
 
     /**
-     * 倒计时时长选择：分 / 秒 两个滚轮。
+     * 倒计时时长选择：时 / 分 / 秒 三个滚轮。
      *
-     * 上限锁死 59:59 —— 车机的时钟格是 mm:ss，没有小时位，
-     * 超过 59 分钟的分值会被车机判定为 INVALID_DATA 直接拒掉
-     * （实测 minutes=99 → INVALID_DATA）。所以这里不做小时，
-     * 分钟也只给到 59。
+     * <p>2026-11-27 实车确认车机时钟格<b>有小时位</b>（{@code startTime.hours} 生效），
+     * 所以时长不再锁死在 {@code 59:59}。小时先给到 59（SDL 的 {@code StartTime.hours}
+     * 是 0~59，车机的真实上限待实测），分 / 秒仍是 0~59。</p>
      */
     private void showCountdownDialog() {
         android.widget.LinearLayout root = new android.widget.LinearLayout(this);
         root.setOrientation(android.widget.LinearLayout.HORIZONTAL);
         root.setGravity(android.view.Gravity.CENTER);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        int pad = (int) (14 * getResources().getDisplayMetrics().density);
         root.setPadding(pad, pad, pad, pad);
 
+        android.widget.NumberPicker hourPicker = new android.widget.NumberPicker(this);
         android.widget.NumberPicker minPicker = new android.widget.NumberPicker(this);
-        minPicker.setMinValue(0);
-        minPicker.setMaxValue(59);
-        minPicker.setValue(5);
-        minPicker.setFormatter(v -> String.format(java.util.Locale.US, "%02d", v));
-
         android.widget.NumberPicker secPicker = new android.widget.NumberPicker(this);
-        secPicker.setMinValue(0);
-        secPicker.setMaxValue(59);
+        for (android.widget.NumberPicker p : new android.widget.NumberPicker[]{hourPicker, minPicker, secPicker}) {
+            p.setMinValue(0);
+            p.setMaxValue(59);
+            p.setFormatter(v -> String.format(java.util.Locale.US, "%02d", v));
+            // 三个滚轮平分宽度，窄屏也放得下
+            p.setLayoutParams(new android.widget.LinearLayout.LayoutParams(
+                    0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        }
+        hourPicker.setValue(0);
+        minPicker.setValue(5);
         secPicker.setValue(0);
-        secPicker.setFormatter(v -> String.format(java.util.Locale.US, "%02d", v));
 
-        TextView mLab = new TextView(this);
-        mLab.setText(" 分 ");
-        mLab.setTextSize(16);
-        TextView sLabel = new TextView(this);
-        sLabel.setText(" 秒 ");
-        sLabel.setTextSize(16);
-
+        root.addView(hourPicker);
+        root.addView(label(" 时 "));
         root.addView(minPicker);
-        root.addView(mLab);
+        root.addView(label(" 分 "));
         root.addView(secPicker);
-        root.addView(sLabel);
+        root.addView(label(" 秒 "));
 
         new AlertDialog.Builder(this)
-                .setTitle("倒计时时长")
+                .setTitle("倒计时时长（时:分:秒）")
                 .setView(root)
                 .setPositiveButton("开始", (d, w) -> {
+                    int h = hourPicker.getValue();
                     int m = minPicker.getValue();
                     int s = secPicker.getValue();
-                    if (m == 0 && s == 0) { toast("时长不能为 0"); return; }
-                    timer(0, m, s, "COUNTDOWN");
-                    toast(String.format(java.util.Locale.US, "倒计时 %02d:%02d", m, s));
+                    if (h == 0 && m == 0 && s == 0) { toast("时长不能为 0"); return; }
+                    timer(h, m, s, "COUNTDOWN");
+                    toast("倒计时 " + fmtHMS(h, m, s));
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private TextView label(String text) {
+        TextView v = new TextView(this);
+        v.setText(text);
+        v.setTextSize(16);
+        return v;
+    }
+
+    /** 时长显示：有小时才画小时段（与车机时钟格一致） */
+    private static String fmtHMS(int h, int m, int s) {
+        if (h > 0) return String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s);
+        return String.format(java.util.Locale.US, "%02d:%02d", m, s);
     }
 
     // ---------------- 键位 ----------------
