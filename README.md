@@ -153,3 +153,21 @@ app/src/main/java/com/xigaigai/syncglance/
 
 核心功能（R1–R17）均已实车验证可用。已知未完成项见 [docs/todo.md](docs/todo.md)，
 其中 **锁屏界面**是福特官方验证项的强制要求，目前缺失会导致 4 条用例失败。
+
+## 许可
+
+本项目采用 **GNU General Public License v3.0**（GPL-3.0）发布，
+完整条款见 [LICENSE](LICENSE)，版权与免责声明见 [NOTICE](NOTICE)。
+
+- 允许：使用、修改、再分发，**包括商业性使用**
+- 要求：分发（不管是修改版还是原版）必须**同样以 GPL-3.0 开放源代码**，
+  并保留版权声明；不提供任何担保
+
+第三方依赖的许可：
+
+| 依赖 | 许可 |
+|---|---|
+| [smartdevicelink/sdl_java_suite](https://github.com/smartdevicelink/sdl_java_suite)（`sdl_android:5.8.0`） | BSD-3-Clause |
+| [atilika/kuromoji](https://github.com/atilika/kuromoji)（日文分词，间接依赖） | Apache-2.0 |
+
+GPL-3.0 与上述两个许可兼容（两者都是 GPL 兼容的宽松许可）。
